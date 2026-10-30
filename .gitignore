@@ -1,0 +1,4 @@
+*.bak
+*.bak.*
+*.removed.*
+.DS_Store

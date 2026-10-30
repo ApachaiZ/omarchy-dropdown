@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "settings": {
+    "geometry": {
+      "preset": "medium",
+      "widthPercent": 60,
+      "heightPercent": 80,
+      "topOffset": 12,
+      "sideMargin": 0,
+      "edge": "top",
+      "placement": "top"
+    },
+    "animations": {
+      "mode": "slide+fade",
+      "durationMs": 180,
+      "easing": "outCubic",
+      "reducedMotion": false
+    },
+    "autoHideOnFocusLoss": true,
+    "screen": "auto",
+    "autoHideDelayMs": 5000,
+    "commands": {
+      "help": "?",
+      "manage": "m",
+      "preview": "p",
+      "settings": "s",
+      "motion": "a",
+      "shortcuts": "k",
+      "hide": "h",
+      "quit": "q",
+      "bar": "b",
+      "popout": "'",
+      "nextWindow": "w"
+    },
+    "tabs": {
+      "position": "top"
+    },
+    "topApps": 5
+  },
+  "apps": {
+    "system.terminal": {
+      "enabled": false,
+      "key": "t"
+    },
+    "system.agent": {
+      "enabled": false,
+      "key": "i"
+    },
+    "system.files": {
+      "enabled": false,
+      "key": "f"
+    }
+  }
+}

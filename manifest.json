@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "apach.dropdown",
+  "name": "Dropdown",
+  "version": "0.7.10",
+  "author": "ApachaiZ",
+  "license": "MIT",
+  "description": "Keyboard-first dropdown windows for Omarchy web apps, plus the default AI agent, terminal and file manager. Native windows, parked sessions, one visible at a time.",
+  "kinds": [
+    "service",
+    "overlay",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "overlay": "Overlay.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Dropdown",
+    "description": "Open the Dropdown palette; right-click for Manage.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
