@@ -20,6 +20,13 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   enforced by `tests/qml-security.test.mjs`, which fails CI when a `Text`
   element is added without it or when `AutoText`/`RichText` is requested.
   A title containing `<img src="…">` is displayed literally and never fetched.
+- **Tooltips and controls**: `Text` is not the only sink. A stock
+  `QtQuick.Controls.ToolTip` renders its `text` through an internal `Text`
+  with the default `AutoText`, and so do `Button`/`Label` content items.
+  Dynamic strings must use a component that sets `PlainText` (Omarchy's bar
+  and panel controls do) or override `contentItem` with a `PlainText` `Text`,
+  as Quay does for application names. Never put a window title, app name or
+  notification body in a stock tooltip.
 - **Images**: only `Quickshell.iconPath(<icon name from a desktop entry>)`.
   No URL or title ever reaches an `Image.source`.
 - **Process execution**: launches use argv vectors with
@@ -38,7 +45,8 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 ## Checklist for a change
 
 1. Does it introduce a new untrusted string? Where is it rendered? If it is a
-   `Text`, `PlainText` is mandatory; if it is an `Image`, it must not be a URL.
+   `Text`, `PlainText` is mandatory; check tooltips, buttons and labels too.
+   If it is an `Image`, it must not be a URL.
 2. Does it pass a value to a process or a Hyprland dispatcher? Use an argv
    vector or `luaString`/`windowSelector`; never interpolate into a shell.
 3. Does it write a file? Keep it under `~/.config/omarchy` or the state dir,
