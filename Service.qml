@@ -3145,6 +3145,7 @@ Item {
           opacity: 0.9
         }
         Text {
+          textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
           text: service.shellName
           color: Commons.Color.popups.text

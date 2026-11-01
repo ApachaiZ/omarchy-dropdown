@@ -7,6 +7,7 @@ import { readFileSync, readdirSync } from "node:fs"
 // title containing <img src="..."> made the shell fetch a remote URL.
 const files = [
   "Overlay.qml",
+  "Service.qml",
   "BarWidget.qml",
   ...readdirSync("components")
     .filter((name) => name.endsWith(".qml"))
