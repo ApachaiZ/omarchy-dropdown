@@ -70,6 +70,7 @@ Item {
         active: drawer.open
       }
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: "All apps · " + drawer.count
         color: drawer.open ? Commons.Color.accent : Commons.Color.popups.text
@@ -77,6 +78,7 @@ Item {
         font.pixelSize: Style.font.bodySmall
       }
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: "▾"
         color: drawer.open ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.3)

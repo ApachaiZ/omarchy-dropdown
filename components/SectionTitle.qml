@@ -10,6 +10,7 @@ Item {
   height: 28
 
   Text {
+    textFormat: Text.PlainText
     anchors.centerIn: parent
     text: parent.title
     color: Qt.darker(Commons.Color.popups.text, 1.25)

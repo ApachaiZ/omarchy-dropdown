@@ -58,6 +58,7 @@ Item {
     border.color: Commons.Color.accent
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: Math.round(preview.widthPercent) + "% × " + Math.round(preview.heightPercent) + "%"
       color: Commons.Color.accent

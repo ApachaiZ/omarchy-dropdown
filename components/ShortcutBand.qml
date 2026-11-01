@@ -31,6 +31,7 @@ Item {
 
         KeyCap { anchors.verticalCenter: parent.verticalCenter; label: modelData.key; active: false }
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           text: modelData.label
           color: Qt.darker(Commons.Color.popups.text, 1.35)

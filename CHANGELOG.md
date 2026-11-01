@@ -4,6 +4,16 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.7.11 — 2026-11-01
+
+### Security
+
+- Every `Text` that renders dynamic content (window titles, application
+  names, notices, prompts) now uses `Text.PlainText`. A browser-controlled
+  window title containing HTML, for example an image tag, is displayed
+  literally and can no longer make the shell fetch a remote URL when the
+  Preview view opens. Reported in the marketplace review.
+
 ## 0.7.10 — 2026-10-31
 
 ### Fixed

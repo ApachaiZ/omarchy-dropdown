@@ -46,6 +46,7 @@ Item {
     border.color: row.app && row.app.enabled ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.28)
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       visible: row.app !== null && row.app.enabled === true
       text: "✓"
@@ -69,6 +70,7 @@ Item {
   }
 
   Text {
+    textFormat: Text.PlainText
     visible: !row.app || !row.app.icon
     anchors.centerIn: icon
     text: "•"
@@ -86,6 +88,7 @@ Item {
     spacing: 1
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: row.app ? String(row.app.name || row.app.id) : ""
       color: Commons.Color.popups.text
@@ -95,6 +98,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: row.secondaryLabel !== ""
       text: row.secondaryLabel

@@ -29,6 +29,7 @@ Item {
     spacing: 12
 
     Text {
+      textFormat: Text.PlainText
       width: row.labelWidth
       anchors.verticalCenter: parent.verticalCenter
       horizontalAlignment: Text.AlignRight
@@ -49,6 +50,7 @@ Item {
       border.color: Qt.rgba(1, 1, 1, 0.10)
 
       Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: "−"
         color: Commons.Color.accent
@@ -65,6 +67,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: 82
       anchors.verticalCenter: parent.verticalCenter
       horizontalAlignment: Text.AlignHCenter
@@ -85,6 +88,7 @@ Item {
       border.color: Qt.rgba(1, 1, 1, 0.10)
 
       Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: "+"
         color: Commons.Color.accent

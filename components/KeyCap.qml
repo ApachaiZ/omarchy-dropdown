@@ -15,6 +15,7 @@ Rectangle {
   border.color: cap.active ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.10)
 
   Text {
+    textFormat: Text.PlainText
     id: text
     anchors.centerIn: parent
     text: cap.label

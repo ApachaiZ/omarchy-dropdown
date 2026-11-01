@@ -98,6 +98,7 @@ Rectangle {
     spacing: 1
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: card.app ? String(card.app.name || card.app.id) : ""
       color: Commons.Color.popups.text
@@ -107,6 +108,7 @@ Rectangle {
       elide: Text.ElideRight
     }
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: card.app
         ? (card.app.shortcut || Model.stateLabel(card.app.state))

@@ -57,6 +57,7 @@ Rectangle {
   }
 
   Text {
+    textFormat: Text.PlainText
     anchors.left: parent.left
     anchors.leftMargin: 10
     anchors.top: parent.top
@@ -91,6 +92,7 @@ Rectangle {
   }
 
   Text {
+    textFormat: Text.PlainText
     anchors.left: parent.left
     anchors.right: parent.right
     anchors.leftMargin: 8

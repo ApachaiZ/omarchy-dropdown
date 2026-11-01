@@ -26,6 +26,7 @@ Item {
 
     KeyCap { label: chip.key }
     Text {
+      textFormat: Text.PlainText
       anchors.verticalCenter: parent.verticalCenter
       text: chip.label
       color: Commons.Color.popups.text

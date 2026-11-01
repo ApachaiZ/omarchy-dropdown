@@ -112,6 +112,7 @@ Item {
               }
             }
             Text {
+              textFormat: Text.PlainText
               id: tabName
               width: Math.min(implicitWidth, 88)
               anchors.verticalCenter: parent.verticalCenter
@@ -123,6 +124,7 @@ Item {
               elide: Text.ElideRight
             }
             Text {
+              textFormat: Text.PlainText
               anchors.verticalCenter: parent.verticalCenter
               text: String(modelData.key || "")
               color: active ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.5)

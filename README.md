@@ -556,6 +556,9 @@ the live client list; a stale address is never applied.
 - A new instance is identified from a pre-launch window snapshot, so an
   ordinary window is not moved or resized by accident.
 - No cookies, tokens, URLs or application content are logged.
+- Dynamic text (window titles, app names, notices) is rendered with
+  `Text.PlainText`; a title containing HTML or a remote image URL is shown
+  literally and never fetched.
 - Config backups stay in `~/.config/omarchy/` and contain only the same settings
   as `dropdown.json`; they are never uploaded.
 - `doctor` and `status` are local read-only IPC calls; redact app names before

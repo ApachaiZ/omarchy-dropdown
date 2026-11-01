@@ -1819,6 +1819,7 @@ Item {
             height: 28
 
             Text {
+              textFormat: Text.PlainText
               anchors.horizontalCenter: parent.horizontalCenter
               anchors.verticalCenter: parent.verticalCenter
               width: parent.width - Style.space(100)
@@ -1853,6 +1854,7 @@ Item {
             spacing: 8
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: overlay.service && overlay.service.currentApp
@@ -1865,6 +1867,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: overlay.popoutMode
@@ -1924,6 +1927,7 @@ Item {
             // Running windows now live in the tab strip, so the base surface
             // stays to the five pinned applications plus the shortcut band.
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               visible: text !== ""
@@ -1939,6 +1943,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: overlay.view === "running" && overlay.rows.length > 0
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
@@ -1977,6 +1982,7 @@ Item {
               height: modelData.kind === "header" ? 26 : (overlay.view === "running" ? 108 : 42)
 
               Text {
+                textFormat: Text.PlainText
                 visible: modelData.kind === "header"
                 anchors.left: parent.left
                 anchors.leftMargin: 10
@@ -2053,6 +2059,7 @@ Item {
                     spacing: 8
                     KeyCap { label: modelData.key || "—"; active: true }
                     Text {
+                      textFormat: Text.PlainText
                       visible: reservedLabel !== ""
                       anchors.verticalCenter: parent.verticalCenter
                       text: reservedLabel
@@ -2062,6 +2069,7 @@ Item {
                       font.bold: true
                     }
                     Text {
+                      textFormat: Text.PlainText
                       anchors.verticalCenter: parent.verticalCenter
                       text: String(modelData.name || modelData.id || "")
                       color: Commons.Color.popups.text
@@ -2073,6 +2081,7 @@ Item {
                     }
                   }
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: overlay.windowTitle(modelData.id) || modelData.note || modelData.detail || ""
                     color: Qt.darker(Commons.Color.popups.text, 1.35)
@@ -2095,6 +2104,7 @@ Item {
                   border.width: 1
                   border.color: modelData.state === "error" ? Commons.Color.urgent : Qt.rgba(1, 1, 1, 0.10)
                   Text {
+                    textFormat: Text.PlainText
                     id: stateText
                     anchors.centerIn: parent
                     text: Model.stateLabel(modelData.state)
@@ -2139,6 +2149,7 @@ Item {
                   active: index === overlay.sel
                 }
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width - 50
                   anchors.verticalCenter: parent.verticalCenter
                   text: modelData.label || ""
@@ -2162,6 +2173,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: overlay.view === "running" && overlay.rows.length === 0
             width: parent.width
             text: "No managed application is running."
@@ -2171,6 +2183,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             visible: false
@@ -2188,6 +2201,7 @@ Item {
             spacing: Style.space(4)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "Move the Dropdown widget between the left, centre and right sections of the Omarchy bar."
@@ -2237,6 +2251,7 @@ Item {
                   border.color: active ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.08)
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     text: modelData + " · " + card.items + (card.items === 1 ? " item" : " items")
                     horizontalAlignment: Text.AlignHCenter
@@ -2280,6 +2295,7 @@ Item {
                   color: index === overlay.sel ? Qt.rgba(1, 1, 1, 0.12) : "transparent"
                 }
                 Text {
+                  textFormat: Text.PlainText
                   anchors.left: parent.left
                   anchors.leftMargin: 10
                   anchors.right: keyCap.left
@@ -2317,6 +2333,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               visible: false
@@ -2328,6 +2345,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "The open shortcut is configured in ~/.config/hypr/dropdown.lua (primary / secondary), then run hyprctl reload. Defaults: Super+Alt+; and Super+;. Reduce is Esc."
@@ -2370,6 +2388,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 visible: overlay.search === ""
                 anchors.left: parent.left
                 anchors.leftMargin: 10
@@ -2420,6 +2439,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: overlay.view === "manage" && overlay.rows.length === 0
               width: parent.width
               text: "No matching application. Press Esc or / to clear the filter."
@@ -2429,6 +2449,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: text !== ""
               text: overlay.serviceNotice()
@@ -2440,6 +2461,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: overlay.assigning
               text: overlay.assigning ? "Press a key for " + (overlay.service.findApp(overlay.assignAppId) ? overlay.service.findApp(overlay.assignAppId).name : "") + " — Esc cancels." : ""
@@ -2449,6 +2471,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: overlay.assigningShortcut
               text: !overlay.assigningShortcut ? ""
@@ -2468,6 +2491,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               visible: false
@@ -2499,6 +2523,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "Position: " + String(overlay.geometry.placement || "center")
@@ -2585,6 +2610,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "The tab strip lists open managed windows. Ctrl+Tab cycles them; a click switches too."
@@ -2596,6 +2622,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               visible: false
@@ -2631,6 +2658,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "Applies to every monitor; 90°/270° outputs are handled in layout coordinates."
@@ -2680,6 +2708,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               visible: false
@@ -2691,6 +2720,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "The palette and the managed window slide from the configured edge. Dropdown never changes your Hyprland animation settings."
