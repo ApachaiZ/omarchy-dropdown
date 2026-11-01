@@ -567,7 +567,8 @@ the live client list; a stale address is never applied.
   `hyprctl clients -j`; no timer while idle; launch watcher only for the
   bounded launch; opacity fade only on reveal.
 
-See `docs/performance.md` for the reproducible idle measurement,
+See `docs/security.md` for the threat model and the pre-release checklist,
+`docs/performance.md` for the reproducible idle measurement,
 `docs/validation.md` for what was exercised and what remains environment
 dependent, and `docs/troubleshooting.md` for symptom-based fixes.
 
