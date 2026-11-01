@@ -1,7 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
-import { globSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
 
 // Regression guard for the marketplace security review: dynamic strings
 // (window titles in particular) must never be interpreted as rich text. A
@@ -9,7 +8,9 @@ import { globSync } from "node:fs"
 const files = [
   "Overlay.qml",
   "BarWidget.qml",
-  ...globSync("components/*.qml")
+  ...readdirSync("components")
+    .filter((name) => name.endsWith(".qml"))
+    .map((name) => "components/" + name)
 ]
 
 test("every QML Text is plain text", () => {
