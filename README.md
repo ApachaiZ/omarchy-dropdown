@@ -1,7 +1,9 @@
 # Omarchy Dropdown
 
-[![Latest release](https://img.shields.io/badge/release-v0.7.10-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
-[![Quay integration](https://img.shields.io/badge/Quay-1.0.1%2B-4c8bf5)](https://github.com/ApachaiZ/omarchy-quay)
+[![Latest release](https://img.shields.io/badge/release-v0.7.13-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
+[![Quay integration](https://img.shields.io/badge/Quay-1.1.1%2B-4c8bf5)](https://github.com/ApachaiZ/omarchy-quay)
+![Omarchy Dropdown — Your apps. One shortcut.](preview.png)
+
 
 A keyboard-first dropdown launcher for [Omarchy](https://omarchy.org): one key
 opens a compact palette, another key brings a real application window down over

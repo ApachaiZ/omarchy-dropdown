@@ -4,6 +4,14 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.7.13 — 2026-11-01
+
+### Documentation
+
+- New project banner used as the README hero image and as the marketplace
+  preview: palette overview, feature highlights and the primary shortcut in
+  one image.
+
 ## 0.7.12 — 2026-11-01
 
 ### Security
