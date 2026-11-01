@@ -4,6 +4,15 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.7.12 — 2026-11-01
+
+### Security
+
+- The reveal shell name is rendered as plain text, and the QML guard now also
+  covers `Service.qml`.
+- The security checklist now covers tooltips, buttons and labels, which render
+  text through their own internal `Text` elements.
+
 ## 0.7.11 — 2026-11-01
 
 ### Security

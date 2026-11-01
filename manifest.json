@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "apach.dropdown",
   "name": "Dropdown",
-  "version": "0.7.11",
+  "version": "0.7.12",
   "author": "ApachaiZ",
   "license": "MIT",
   "description": "Keyboard-first dropdown windows for Omarchy web apps, plus the default AI agent, terminal and file manager. Native windows, parked sessions, one visible at a time.",
