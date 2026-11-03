@@ -2,11 +2,12 @@
 // renders the result; the tests exercise every transition without Hyprland.
 
 // states: error | launching | stopped | hidden | visible
-function appState(entry, hasWindow, error, launching) {
+function appState(entry, hasWindow, error, launching, closing) {
   if (error) return "error"
   if (launching) return "launching"
   if (!entry) return "stopped"
   if (!hasWindow) return "stopped"
+  if (closing) return "closing"
   return entry.hidden === true ? "hidden" : "visible"
 }
 

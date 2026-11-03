@@ -40,6 +40,37 @@ if generatedFile then
   dofile(generatedBinds)
 end
 
+-- dropdown-preemption-hook v1
+-- Launch preemption. Dropdown arms `_dropdownPending` just before it starts
+-- an app and clears it once the window is adopted. Running inside the
+-- compositor means the window is floated, moved to its parking workspace and
+-- made transparent in the same pass that maps it, before it is ever painted.
+-- Window rules cannot do this: Chromium and Electron create their toplevel
+-- before the rule engine can see the class, while this handler sees it.
+local function ddHas(haystack, needle)
+  if not needle or needle == "" then return false end
+  return string.find(string.lower(haystack or ""), string.lower(needle), 1, true) ~= nil
+end
+
+hl.on("window.open", function(window)
+  local pending = _dropdownPending
+  if type(pending) ~= "table" then return end
+  local now = os.time()
+  for key, entry in pairs(pending) do
+    if type(entry) ~= "table" or type(entry.workspace) ~= "string" then
+      pending[key] = nil
+    elseif entry.expires and entry.expires < now then
+      pending[key] = nil
+    elseif not entry.used and (ddHas(window.class, entry.class) or ddHas(window.title, entry.title)) then
+      entry.used = true
+      hl.dispatch(hl.dsp.window.float({ action = "enable", window = window }))
+      hl.dispatch(hl.dsp.window.set_prop({ window = window, prop = "opacity", value = "0" }))
+      hl.dispatch(hl.dsp.window.move({ workspace = entry.workspace, follow = false, window = window }))
+      hl.dispatch(hl.dsp.window.tag({ tag = "+dropdown-hidden", window = window }))
+    end
+  end
+end)
+
 -- Bare Escape while a dropdown is visible. The service enters this submap
 -- when it shows a managed window and resets it when the window is hidden.
 hl.define_submap("apach-dropdown", function()

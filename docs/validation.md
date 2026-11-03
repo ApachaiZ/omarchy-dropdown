@@ -12,12 +12,12 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 61/61 pass |
+| `node --test tests/*.test.mjs` | 71/71 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | Manifest entry points exist | pass |
 | Example config validates | pass |
-| No shell interpolation (`sh -c`, `eval`, `pkill`) in the plugin | pass |
+| No unquoted shell interpolation; Lua/batch values are escaped (`luaString`, `shellQuote`) | pass |
 | Geometry for top/bottom/left/right, transforms, clamps | pass |
 | Webapp class derivation from real Chromium classes | pass |
 | Key collision / reserved commands | pass |
@@ -63,7 +63,7 @@ Environment where the graphical checks were run:
 | Full-screen palette; click outside closes it and releases focus | `outsideClick()` exercised directly; QML mouse catcher is standard |
 | Managed window floating, brought to the top of the floating stack | works |
 | Managed window reveal | shell card slides from the edge, app fades in beneath, card fades out; the app window is not moved |
-| Newly launched window default-size flash | reduced to ~50 ms by the 35 ms openwindow adoption; one map frame remains |
+| Newly launched window default-size flash | eliminated: the `window.open` compositor hook parks the window in the same pass (map + move in the same millisecond; neighbouring windows do not reflow) |
 | Reduced motion: reveal places the window directly at its final geometry | works (no intermediate position samples) |
 | Fresh launch with a slow-painting web app | placed at the final geometry; no blank block slides in |
 | Reveal has no intermediate frame and no app-window motion | works (parked → final; shell slide + fade observed at 60 fps) |
@@ -74,14 +74,15 @@ Environment where the graphical checks were run:
 | Direct binds verified against `hyprctl binds -j` after startup and `configreloaded` | works; missing binds trigger a re-apply |
 | Fuzzy search: subsequence matches ranked by score | works ("dsc" finds Discord) |
 | Reveal card shows the app icon and name | works |
-| `doctorRedacted` masks app ids/names/notes | works |
+| `doctorRedacted` masks app ids/names/notes, current/last, registry/launching ids, errors and conflicts | works |
 | Uninstall saves bar placement, install restores it | scripts check out; placement saved to `dropdown.bar-placement.json` |
 | Orphan terminal/agent window adopted on toggle and after startup | works (duplicate kitty became managed, Escape hides it) |
 | A window visible at shutdown is parked at startup, not shown | works (Discord visible → restart → parked) |
-| Obsidian (Flatpak) show/hide/restart cycle | works; parked on the shared special, Escape hides it |
+| Obsidian (Flatpak) show/hide/restart cycle | works; parked on its own `special:dropdown-obsidian-…`, Escape hides it |
 | Relaunch after closing a single-instance app | adopts the parked window in ~1 s instead of timing out |
-| Named special cannot be created at runtime | falls back to the shared special; no `Invalid workspace` |
-| Alt-Tab/dock access to a parked window | adopted as current without moving it; stays open, Escape hides it and dismisses the special |
+| Named special created on demand | works; every app gets its own workspace, no `Invalid workspace` |
+| Alt-Tab/dock access to a parked window | adopted as current and re-applied the configured geometry; stays open, Escape hides it and dismisses the special |
+| Parked window translated to an off-screen position, then focused | adoption moves it back to the configured geometry on the monitor showing the special |
 | Alt-Tab to another window while a shown-special dropdown is current | auto-hide parks it and closes the special |
 | Parked windows carry `dropdown-hidden`; removed on reveal | works (hyprctl clients tags) |
 | Quay ignores tagged windows | works (Quay 1.0.1 filter) |

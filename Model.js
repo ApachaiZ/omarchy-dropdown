@@ -202,6 +202,36 @@ function isWebappEntry(entry) {
   return webappUrl(entry) !== ""
 }
 
+// Class fragment matched (plain, case-insensitive) by the compositor's
+// window.open handler while a launch is armed. Chromium and Electron set
+// their app_id before the window maps, but the window-rule engine evaluates
+// class rules too early to see it; the event handler does. A browser PWA is
+// matched on the brand-independent "-host__" fragment so Brave, Chrome and
+// Chromium all match without knowing which browser owns the window.
+function launchClassMatch(app) {
+  if (!app) return ""
+  var expected = String(app.expectedClass || "").trim()
+  if (expected) return expected
+  // A configured URL also identifies apps that wrap a browser PWA without a
+  // StartupWMClass (custom launchers such as MailFlow's handler).
+  if (app.url) {
+    var parts = urlParts(app.url)
+    if (parts && parts.host) return "-" + parts.host + "__"
+  }
+  var cls = String(app.startupClass || "").trim()
+  if (cls) return cls
+  var bare = stripDesktop(String(app.desktopId || app.id || "")).trim()
+  return bare.length >= 3 ? bare : ""
+}
+
+// Title fallback for web apps whose initial title is the URL host (Chromium
+// maps the PWA as "discord.com_/channels/@me" before the real title arrives).
+function launchTitleMatch(app) {
+  if (!app || !app.url) return ""
+  var parts = urlParts(app.url)
+  return parts && parts.host ? parts.host : ""
+}
+
 // Chromium-family PWAs installed by the browser itself do not use
 // omarchy-launch-webapp. They expose either a `chrome-...-Default`
 // StartupWMClass or an `--app=` / `--app-id=` flag.
@@ -307,8 +337,8 @@ function specialPrefix() {
 
 function isManagedSpecial(name) {
   var value = String(name || "")
-  // Current Hyprland builds cannot create a new named special workspace at
-  // runtime, so Dropdown falls back to the unnamed special workspace.
+  // The unnamed special is accepted for windows parked by older builds; new
+  // builds use one named workspace per app.
   if (value === "special" || value === "special:special") return true
   return value.indexOf(specialPrefix()) === 0
 }
@@ -323,6 +353,27 @@ function normalizeAddress(address) {
 
 function validAddress(address) {
   return normalizeAddress(address) !== ""
+}
+
+// Checked variants: null means "the query failed and the previous state must
+// be kept". An empty string or invalid JSON must never be mistaken for "no
+// window/monitor exists", which would clear the whole registry.
+function parseClientsChecked(raw) {
+  var text = String(raw || "").trim()
+  if (!text) return null
+  var parsed = null
+  try { parsed = JSON.parse(text) } catch (e) { return null }
+  if (!Array.isArray(parsed)) return null
+  return parseClients(text)
+}
+
+function parseMonitorsChecked(raw) {
+  var text = String(raw || "").trim()
+  if (!text) return null
+  var parsed = null
+  try { parsed = JSON.parse(text) } catch (e) { return null }
+  if (!Array.isArray(parsed)) return null
+  return parseMonitors(text)
 }
 
 function parseClients(raw) {
@@ -483,6 +534,30 @@ function monitorForName(monitors, name) {
   return monitors.length > 0 ? monitors[0] : null
 }
 
+// Strict variant used to adopt an already existing window: a browser tab
+// whose title a web page set to the app name must never be captured. Only a
+// class/URL match (or the dedicated terminal PID) counts here.
+function windowMatchesClass(app, win) {
+  if (!app || !win) return false
+  var cls = String(win.class || "").toLowerCase()
+  var icls = String(win.initialClass || "").toLowerCase()
+  if (app.url && (webappClassMatches(win.class, app.url) || webappClassMatches(win.initialClass, app.url))) return true
+  if (app.kind === "webapp") {
+    var expected = String(app.expectedClass || "").toLowerCase()
+    return expected !== "" && (cls === expected || icls === expected)
+  }
+  if (app.kind === "system" && (app.system === "terminal" || app.system === "agent")) {
+    var systemClass = String(app.expectedClass || "").toLowerCase()
+    if (systemClass && (cls === systemClass || icls === systemClass)) return true
+    return !!(app.pid && Number(win.pid) === Number(app.pid))
+  }
+  var startup = String(app.startupClass || "").toLowerCase()
+  if (startup && (cls === startup || icls === startup)) return true
+  var id = String(app.desktopId || app.id || "").toLowerCase()
+  var bare = stripDesktop(id)
+  return bare !== "" && (cls === bare || icls === bare)
+}
+
 // Does this Hyprland client belong to the managed application? `app` carries
 // the expected class/url/desktop id; `pid` is set for plugin-launched terminal
 // instances.
@@ -492,8 +567,10 @@ function windowMatches(app, win) {
   var icls = String(win.initialClass || "").toLowerCase()
   var title = String(win.title || "").toLowerCase()
   var name = String(app.name || "").toLowerCase()
+  // A URL identifies the browser window whatever the desktop entry kind is.
+  // This also covers launchers that bypass StartupWMClass (MailFlow).
+  if (app.url && (webappClassMatches(win.class, app.url) || webappClassMatches(win.initialClass, app.url))) return true
   if (app.kind === "webapp") {
-    if (app.url && (webappClassMatches(win.class, app.url) || webappClassMatches(win.initialClass, app.url))) return true
     var expected = String(app.expectedClass || "").toLowerCase()
     if (expected && (cls === expected || icls === expected)) return true
     return name.length >= 3 && title.indexOf(name) >= 0
@@ -704,9 +781,20 @@ function keyConflicts(apps) {
   return out
 }
 
+// A single printable, non-space, lowercase character. Key presses are
+// matched on lowercased text, so "T" and "t" must be the same key, and
+// control characters (including Escape) must never be assignable.
+function normalizeKeyChar(value) {
+  var text = String(value || "")
+  if (text.length !== 1) return ""
+  var code = text.charCodeAt(0)
+  if (code < 33 || code === 127) return ""
+  return text.toLowerCase()
+}
+
 function validateKey(key, appId, apps, enabledSystem, commands) {
-  var value = String(key || "")
-  if (value.length !== 1) return { ok: false, error: "Use a single character." }
+  var value = normalizeKeyChar(key)
+  if (!value) return { ok: false, error: "Use a single printable character." }
   var reserved = reservedKeys(enabledSystem, commands)
   if (reserved.indexOf(value) >= 0) {
     return { ok: false, error: "\"" + value + "\" is a palette command. Pick another key." }
@@ -790,9 +878,8 @@ function validateConfig(raw) {
   if (isPlainObject(settings.commands)) {
     var commands = {}
     for (var name in DEFAULT_COMMANDS) {
-      var candidate = settings.commands[name]
-      if (typeof candidate === "string" && candidate.length === 1) commands[name] = candidate
-      else commands[name] = DEFAULT_COMMANDS[name]
+      var candidate = normalizeKeyChar(settings.commands[name])
+      commands[name] = candidate || DEFAULT_COMMANDS[name]
     }
     // Resolve duplicates deterministically: the first command keeps the key,
     // later ones fall back to their default only if that default is free.
@@ -808,12 +895,21 @@ function validateConfig(raw) {
 
   if (isPlainObject(parsed.apps)) {
     for (var id in parsed.apps) {
+      // JSON.parse can create an own "__proto__" key. Assigning
+      // config.apps["__proto__"] would replace the map's prototype and make
+      // every catalog row inherit the attacker's enabled/key fields.
+      if (!Object.prototype.hasOwnProperty.call(parsed.apps, id)) continue
+      if (id === "__proto__" || id === "constructor" || id === "prototype") continue
       var entry = parsed.apps[id]
       if (!isPlainObject(entry)) continue
       if (!config.apps[id]) config.apps[id] = {}
       var target = config.apps[id]
       if (typeof entry.enabled === "boolean") target.enabled = entry.enabled
-      if (typeof entry.key === "string" && entry.key.length <= 1) target.key = entry.key
+      if (typeof entry.key === "string") {
+        var appKey = normalizeKeyChar(entry.key)
+        if (appKey) target.key = appKey
+        else if (entry.key !== "") warnings.push("Ignored invalid key for " + id + ".")
+      }
       if (typeof entry.launchAtLogin === "boolean") target.launchAtLogin = entry.launchAtLogin
       if (typeof entry.shortcut === "string") {
         var shortcut = normalizeShortcut(entry.shortcut)
@@ -854,16 +950,6 @@ function setPath(object, path, value) {
   node[parts[parts.length - 1]] = value
 }
 
-function getPath(object, path, fallback) {
-  var parts = String(path || "").split(".")
-  var node = object
-  for (var i = 0; i < parts.length; i++) {
-    if (!isPlainObject(node) || node[parts[i]] === undefined) return fallback
-    node = node[parts[i]]
-  }
-  return node
-}
-
 function stateLabel(state) {
   var labels = {
     stopped: "Stopped",
@@ -890,7 +976,6 @@ function applyPreset(geometry, preset) {
   }
 }
 
-// Local-time HH:MM:SS for logs and the state file. Kept out of the UI.
 // Parse this widget's place in ~/.config/omarchy/shell.json. Returns the
 // current section, its 0-based index and every section's size.
 function parseBarPlacement(raw, widgetId) {
@@ -919,10 +1004,6 @@ function parseBarPlacement(raw, widgetId) {
   }
   return { section: section, index: index, sizes: sizes }
 }
-
-// Easing for the compositor-side slide tween. Kept here so the shape is
-// testable without a running compositor.
-
 
 // Score how well `query` matches `text` for the Manage search. -1 = no match.
 // Substring matches rank first, then subsequences with bonuses for word
@@ -1002,27 +1083,32 @@ if (typeof module !== "undefined") {
     urlParts: urlParts,
     webappClass: webappClass,
     webappClassMatches: webappClassMatches,
+    launchClassMatch: launchClassMatch,
+    launchTitleMatch: launchTitleMatch,
     hash: hash,
     specialWorkspace: specialWorkspace,
     isManagedSpecial: isManagedSpecial,
     validAddress: validAddress,
     normalizeAddress: normalizeAddress,
     parseClients: parseClients,
+    parseClientsChecked: parseClientsChecked,
     parseMonitors: parseMonitors,
+    parseMonitorsChecked: parseMonitorsChecked,
     monitorBox: monitorBox,
     geometryFor: geometryFor,
     slideStart: slideStart,
     monitorForName: monitorForName,
     windowMatches: windowMatches,
+    windowMatchesClass: windowMatchesClass,
     reservedKeys: reservedKeys,
     firstFreeKey: firstFreeKey,
     keyConflicts: keyConflicts,
     validateKey: validateKey,
+    normalizeKeyChar: normalizeKeyChar,
     enabledSystemMap: enabledSystemMap,
     validateConfig: validateConfig,
     parseBarPlacement: parseBarPlacement,
     setPath: setPath,
-    getPath: getPath,
     stateLabel: stateLabel,
     fuzzyScore: fuzzyScore,
     missingBinds: missingBinds,

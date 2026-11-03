@@ -16,6 +16,11 @@ MONITOR="${1:-$(hyprctl monitors -j | python3 -c 'import json,sys; print(json.lo
 WORKSPACE="${2:-}"
 TMP="$(mktemp -d)"
 
+# Quote a value for the Lua expression passed to `hyprctl dispatch`.
+luaq() {
+  python3 -c 'import sys; s=sys.argv[1]; print("\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"")' "$1"
+}
+
 for tool in grim magick wtype hyprctl omarchy-shell; do
   command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
 done
@@ -56,8 +61,7 @@ cat > "$CONFIG" <<'JSON'
       "mode": "slide+fade",
       "durationMs": 180,
       "easing": "outCubic",
-      "reducedMotion": false,
-      "windowSlide": true
+      "reducedMotion": false
     },
     "tabs": { "position": "top" }
   },
@@ -84,8 +88,8 @@ free = [w for w in json.load(sys.stdin)
 print(free[0]["name"] if free else "10")
 ' "$MONITOR")
 fi
-hyprctl dispatch "hl.dsp.focus({ monitor = \"$MONITOR\" })" >/dev/null 2>&1 || true
-hyprctl dispatch "hl.dsp.focus({ workspace = \"$WORKSPACE\" })" >/dev/null 2>&1 || true
+hyprctl dispatch "hl.dsp.focus({ monitor = $(luaq "$MONITOR") })" >/dev/null 2>&1 || true
+hyprctl dispatch "hl.dsp.focus({ workspace = $(luaq "$WORKSPACE") })" >/dev/null 2>&1 || true
 sleep 0.8
 # If a restored window still occupies it, try the next empty workspace once.
 count=$(hyprctl activeworkspace -j | python3 -c 'import json,sys; print(json.load(sys.stdin).get("windows",0))')
@@ -98,7 +102,7 @@ free = [w for w in json.load(sys.stdin)
         and not str(w.get("name", "")).startswith("special")]
 print(free[0]["name"] if free else "10")
 ' "$MONITOR")
-  hyprctl dispatch "hl.dsp.focus({ workspace = \"$WORKSPACE\" })" >/dev/null 2>&1 || true
+  hyprctl dispatch "hl.dsp.focus({ workspace = $(luaq "$WORKSPACE") })" >/dev/null 2>&1 || true
   sleep 0.8
 fi
 

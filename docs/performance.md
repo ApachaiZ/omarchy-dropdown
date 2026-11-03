@@ -2,14 +2,17 @@
 
 ## What runs at rest
 
-- No timer is armed while the palette is closed and no launch is pending.
+- No repeating timer is armed while the palette is closed and no launch is
+  pending. A one-shot close-confirmation timer runs for a few seconds after a
+  quit request.
 - No `hyprctl` subprocess is spawned at rest.
-- The service keeps a small catalog, the window registry and one `FileView`
-  watcher (config). The state file is read once at startup; watching our own
-  writes would reload stale snapshots and re-adopt released windows. The
-  generated direct-shortcut file is also read once; it has no watcher.
-- `hyprctl binds -j` runs once when a direct shortcut is assigned, to reject
-  conflicts with Omarchy/user/plugin binds. It is not polled.
+- The service keeps a small catalog, the window registry and four `FileView`
+  objects: config and agent defaults are watched; state and generated binds
+  are read once. Watching our own state writes would reload stale snapshots
+  and re-adopt released windows.
+- `hyprctl binds -j` runs when a direct shortcut is assigned, at startup and
+  after `configreloaded` (throttled to 3 s), to reject conflicts with
+  Omarchy/user/plugin binds. It is not polled.
 - `hyprctl reload` runs only when the generated shortcut file actually changes
   (shortcut added/cleared, app enabled/disabled), never on a window event.
 - `Hyprland.rawEvent` subscriptions are passive event handlers.
@@ -32,11 +35,14 @@
 
 - Palette open: one `hyprctl clients -j` and one `hyprctl monitors -j` query,
   then the QML layer surface.
-- Launch: one detached child (browser/terminal/agent), a 300 ms watcher for at
-  most 20 s, and one `hyprctl clients -j` per tick.
-- Reveal: 5–8 `hyprctl dispatch` calls for workspace/float/z-order/resize/move,
-  plus a short position tween (24–30 ms frames for the configured duration) and
-  one focus dispatch.
+- Launch: one `hyprctl eval` to arm the compositor preemption and one detached
+  child (browser/terminal/agent). The window is parked by the compositor hook
+  in the map pass, with no hyprctl round trip in the path; one `hyprctl eval`
+  clears the entry on adoption. A 300 ms watcher runs for at most 20 s, with
+  one `hyprctl clients -j` per tick.
+- Reveal: 5–8 `hyprctl dispatch` calls for workspace/float/z-order/resize/move
+  in one batch, one 30 ms compositor-frame delay before the reveal card moves,
+  a QML `Behavior` for the slide, and one focus dispatch.
 - Hide: one move to the app's special workspace, plus one move per parked
   dialog, then an optional focus restore after 300 ms.
 - No `pkill`, no class-wide enumeration beyond `clients -j` snapshots.

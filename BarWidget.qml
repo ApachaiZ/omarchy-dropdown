@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
@@ -14,7 +13,6 @@ BarWidget {
   property var service: null
 
   readonly property bool hasCurrent: service !== null && service.currentAppId !== ""
-  readonly property bool hasHidden: service !== null && service.lastAppId !== "" && service.currentAppId === ""
   readonly property var hostWindow: QsWindow.window
   readonly property string hostScreenName: hostWindow && hostWindow.screen
     ? String(hostWindow.screen.name || "") : ""
@@ -45,8 +43,8 @@ BarWidget {
   function openPalette(view) {
     if (!root.service) return
     // The bar is per screen. Invoking its widget must open on that screen even
-    // when another output holds keyboard focus.
-    root.service.openPalette(view || "palette", root.hostScreenName)
+    // when another output holds keyboard focus or a screen is pinned.
+    root.service.openPalette(view || "palette", root.hostScreenName, root.hostScreenName !== "")
   }
 
   BarIconButton {

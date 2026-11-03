@@ -16,6 +16,7 @@ import "Model.js" as Model
 import "js/State.js" as State
 import "js/Shortcuts.js" as Shortcuts
 import "js/ConfigFile.js" as ConfigFile
+import "js/Keymap.js" as Keymap
 
 Item {
   id: service
@@ -128,6 +129,7 @@ Item {
       service.config = Model.clone(Model.DEFAULT_CONFIG)
       service.saveConfigNow()
       service.rebuildCatalog()
+      autostartTimer.restart()
     }
     onFileChanged: {
       var current = String(text() || "")
@@ -156,6 +158,7 @@ Item {
       service.stateLoaded = true
       service.savedRegistry = {}
       service.recoverFromSaved()
+      autostartTimer.restart()
     }
   }
 
@@ -214,7 +217,6 @@ Item {
   function normalizeConfig() {
     var next = Model.clone(service.config)
     var changed = false
-    var system = Model.enabledSystemMap(next)
     var used = []
     for (var id in next.apps) {
       var entry = next.apps[id]
@@ -253,7 +255,7 @@ Item {
       if (!app.url || next.apps[app.id]) continue
       for (var oldId in next.apps) {
         var old = next.apps[oldId]
-        if (!old || old.url !== app.url) continue
+        if (!old || String(old.url || "").toLowerCase() !== String(app.url || "").toLowerCase()) continue
         if (service.webapps.some(function(w) { return w.id === oldId })) continue
         var moved = Model.clone(old)
         delete next.apps[oldId]
@@ -295,15 +297,21 @@ Item {
     var out = {}
     if (parsed && parsed.apps && typeof parsed.apps === "object") {
       for (var id in parsed.apps) {
+        if (!Object.prototype.hasOwnProperty.call(parsed.apps, id)) continue
+        if (id === "__proto__" || id === "constructor" || id === "prototype") continue
         var entry = parsed.apps[id]
         if (!entry || !Model.validAddress(entry.address)) continue
+        // Older builds recorded a parking workspace here; it is not a real
+        // destination and must be dropped when the state is recovered.
+        var previousWorkspace = String(entry.previousWorkspace || "")
+        if (Model.isManagedSpecial(previousWorkspace)) previousWorkspace = ""
         out[id] = {
           address: String(entry.address),
           class: String(entry.class || ""),
           pid: Number(entry.pid || 0),
           hidden: entry.hidden === true,
           special: String(entry.special || Model.specialWorkspace(id)),
-          previousWorkspace: String(entry.previousWorkspace || ""),
+          previousWorkspace: previousWorkspace,
           previousMonitor: String(entry.previousMonitor || ""),
           previousFocus: String(entry.previousFocus || ""),
           since: Number(entry.since || 0)
@@ -351,7 +359,7 @@ Item {
         pid: entry.pid || 0,
         hidden: entry.hidden === true,
         special: entry.special || Model.specialWorkspace(id),
-        previousWorkspace: entry.previousWorkspace || "",
+        previousWorkspace: Model.isManagedSpecial(entry.previousWorkspace) ? "" : (entry.previousWorkspace || ""),
         previousMonitor: entry.previousMonitor || "",
         previousFocus: entry.previousFocus || "",
         since: entry.since || 0
@@ -444,7 +452,10 @@ Item {
 
   function commandKey(name) {
     var commands = service.config.settings.commands || Model.DEFAULT_COMMANDS
-    return String(commands[name] || Model.DEFAULT_COMMANDS[name] || "")
+    // An explicitly cleared command ("") must not fall back to its default
+    // key in the help band while commandForKey rejects that key.
+    if (Object.prototype.hasOwnProperty.call(commands, name)) return String(commands[name] || "")
+    return String(Model.DEFAULT_COMMANDS[name] || "")
   }
 
   function commandKeys() {
@@ -452,10 +463,8 @@ Item {
   }
 
   function commandForKey(key) {
-    var value = String(key || "")
-    var commands = service.config.settings.commands || Model.DEFAULT_COMMANDS
-    for (var name in commands) if (String(commands[name]) === value) return name
-    return ""
+    return Keymap.commandForKey(
+      service.config.settings.commands || Model.DEFAULT_COMMANDS, String(key || ""))
   }
 
   function recordUse(appId) {
@@ -500,7 +509,8 @@ Item {
   function stateFor(appId) {
     var entry = service.registry[appId]
     var win = entry ? service.clientByAddress(entry.address) : null
-    return State.appState(entry, !!win, service.errors[appId], service.launching[appId])
+    return State.appState(entry, !!win, service.errors[appId], service.launching[appId],
+      service.closeWatches[appId])
   }
 
   function clientByAddress(address) {
@@ -627,6 +637,11 @@ Item {
       var app = list[j]
       var cfg = service.config.apps[app.id]
       app.enabled = !!(cfg && cfg.enabled === true) && app.available
+      // A configured URL is an identity too: some launchers wrap a browser
+      // PWA without exposing a StartupWMClass (MailFlow-style handlers).
+      if (!app.url && cfg && typeof cfg.url === "string" && Model.isSafeUrl(cfg.url)) {
+        app.url = String(cfg.url)
+      }
       app.key = cfg && typeof cfg.key === "string" ? cfg.key : ""
       app.shortcut = cfg && typeof cfg.shortcut === "string" ? cfg.shortcut : ""
       app.geometry = cfg && cfg.geometry ? cfg.geometry : null
@@ -821,7 +836,7 @@ Item {
       if (!next) next = Model.clone(service.config)
       if (!next.apps[app.id]) next.apps[app.id] = {}
       next.apps[app.id].key = key
-      if (app.url) next.apps[app.id].url = app.url
+      if (app.url && Model.isSafeUrl(app.url)) next.apps[app.id].url = app.url
       used.push(key)
     }
     if (next) {
@@ -923,28 +938,55 @@ Item {
 
   function handleClients(raw) {
     var text = String(raw || "")
-    // Repeated polls often return identical payloads; skip the parse and the
-    // catalog pass unless a launch is waiting for a new window.
+    if (!text.trim()) {
+      console.warn("omarchy-dropdown: hyprctl clients returned no data; keeping the registry")
+      service.drainClientCallbacks()
+      return
+    }
+    // Repeated polls often return identical payloads; skip the JSON parse and
+    // the catalog pass unless a launch is waiting for a new window.
     var hasLaunches = false
     for (var id in service.launching) hasLaunches = true
     if (text === service.lastClientsRaw && !hasLaunches) {
       service.adoptVisibleOrphans()
+      // Config/state can finish loading after the first identical poll. The
+      // parking migration must still run once both are available.
+      service.migrateLegacyParking()
+      service.checkCloseWatches()
+      service.drainClientCallbacks()
+      return
+    }
+    // A failed query must never look like "every window disappeared": that
+    // would clear the registry and overwrite the state file. Keep the last
+    // good client list and let the next poll retry.
+    var parsed = Model.parseClientsChecked(raw)
+    if (parsed === null) {
+      console.warn("omarchy-dropdown: hyprctl clients returned no usable data; keeping the registry")
       service.drainClientCallbacks()
       return
     }
     service.lastClientsRaw = text
-    service.clients = Model.parseClients(raw)
+    service.clients = parsed
     service.reconcileRegistry()
     service.checkLaunches()
     service.refreshCatalogState()
     service.adoptVisibleOrphans()
+    service.migrateLegacyParking()
     service.drainClientCallbacks()
   }
 
   function drainClientCallbacks() {
     var callbacks = service.clientCallbacks.slice()
     service.clientCallbacks = []
-    for (var i = 0; i < callbacks.length; i++) callbacks[i]()
+    // One failing callback must not starve the others (for example the
+    // pending launch callback that starts an application).
+    for (var i = 0; i < callbacks.length; i++) {
+      try {
+        callbacks[i]()
+      } catch (e) {
+        console.warn("omarchy-dropdown: client callback failed: " + String(e))
+      }
+    }
     if (service.clientRefreshAgain) {
       service.clientRefreshAgain = false
       service.refreshClients()
@@ -952,19 +994,27 @@ Item {
   }
 
   function refreshMonitors(callback) {
-    service.pendingMonitorCallback = callback
+    if (typeof callback === "function") service.monitorCallbacks.push(callback)
     if (monitorsProc.running) return
     monitorsProc.running = true
   }
 
-  property var pendingMonitorCallback: null
+  property var monitorCallbacks: []
   property bool monitorCheckPending: false
 
   function handleMonitors(raw) {
-    service.monitors = Model.parseMonitors(raw)
-    var callback = service.pendingMonitorCallback
-    service.pendingMonitorCallback = null
-    if (callback) callback()
+    var parsed = Model.parseMonitorsChecked(raw)
+    if (parsed === null) {
+      console.warn("omarchy-dropdown: hyprctl monitors returned no usable data; keeping the previous layout")
+      var pending = service.monitorCallbacks.slice()
+      service.monitorCallbacks = []
+      for (var p = 0; p < pending.length; p++) pending[p]()
+      return
+    }
+    service.monitors = parsed
+    var callbacks = service.monitorCallbacks.slice()
+    service.monitorCallbacks = []
+    for (var i = 0; i < callbacks.length; i++) callbacks[i]()
     if (service.monitorCheckPending) {
       service.monitorCheckPending = false
       service.revalidateShownWindow()
@@ -972,10 +1022,20 @@ Item {
     service.adoptFocusedParked()
   }
 
+  function monitorShowingSpecial(workspace) {
+    var name = String(workspace || "")
+    for (var i = 0; i < service.monitors.length; i++)
+      if (String(service.monitors[i].specialWorkspace || "") === name) return service.monitors[i]
+    return null
+  }
+
   // Alt-Tab or a dock can activate the special workspace a window is parked
   // on. Adopt the window that actually owns focus as the visible dropdown
-  // without moving it; Escape or focus loss then parks it and dismisses the
-  // special. Moving it here would churn the shared special workspace.
+  // and put it back at the configured geometry. The window keeps its parking
+  // workspace (so Escape still dismisses the special), but its position is
+  // re-derived from the monitor that currently shows the special: Hyprland
+  // translates parked floating windows when the special moves between
+  // outputs, which used to leave them partly or fully off-screen.
   function adoptFocusedParked() {
     var active = Hyprland.activeToplevel
     if (!active) return
@@ -987,17 +1047,69 @@ Item {
       var win = service.clientByAddress(address)
       if (!win || !Model.isManagedSpecial(win.workspace)) return
       if (!service.specialShown(win.workspace)) return
+      // A just-parked window can still own focus for a frame while the
+      // special is being dismissed. Never re-adopt it in that window, or
+      // Escape appears to do nothing.
+      if (entry.hidden === true && entry.parkedAt && Date.now() - entry.parkedAt < 600) return
       if (entry.hidden !== true) {
         service.currentAppId = id
-        service.enterEscapeMode()
+        if (!service.paletteOpen) service.enterEscapeMode()
         return
       }
-      service.registryNext(id, Object.assign({}, entry, { hidden: false, special: win.workspace }))
+      var app = service.findApp(id)
+      var monitor = service.monitorShowingSpecial(win.workspace)
+        || Model.monitorForName(service.monitors, service.monitorNameForId(win.monitor))
+      var geometry = monitor && app
+        ? Model.geometryFor(monitor, service.config.settings.geometry, app.geometry)
+        : null
+      var previousWorkspace = monitor && monitor.activeWorkspace
+        ? String(monitor.activeWorkspace) : entry.previousWorkspace
+      if (Model.isManagedSpecial(previousWorkspace)) previousWorkspace = ""
+      service.registryNext(id, Object.assign({}, entry, {
+        hidden: false,
+        special: win.workspace,
+        previousWorkspace: previousWorkspace,
+        previousMonitor: monitor ? String(monitor.name || "") : entry.previousMonitor
+      }))
       service.currentAppId = id
       service.lastAppId = id
-      service.enterEscapeMode()
+      if (!service.paletteOpen) service.enterEscapeMode()
       service.scheduleStateSave()
       service.refreshCatalogState()
+      if (geometry) {
+        service.hyprBatch([
+          service.floatExpr(win.address),
+          service.opacityExpr(win.address, "1"),
+          service.resizeExpr(win.address, geometry.width, geometry.height),
+          service.placeExpr(win.address, geometry.x, geometry.y)
+        ])
+      }
+      return
+    }
+  }
+
+  // A managed window can stay visible while `currentAppId` was cleared (a
+  // stale client address, a failed registry reconciliation, a shell reload).
+  // In that state Escape had no current target and the window could only be
+  // closed. Re-adopt the focused managed window whenever it belongs to a
+  // normal workspace.
+  function adoptFocusedVisible() {
+    var active = Hyprland.activeToplevel
+    if (!active) return
+    var address = Model.normalizeAddress(active.address)
+    if (!address) return
+    for (var id in service.registry) {
+      var entry = service.registry[id]
+      if (Model.normalizeAddress(entry.address) !== address) continue
+      if (entry.hidden === true) return
+      var win = service.clientByAddress(address)
+      if (!win || Model.isManagedSpecial(win.workspace)) return
+      if (service.currentAppId !== id) {
+        service.currentAppId = id
+        service.lastAppId = id
+        if (!service.paletteOpen) service.enterEscapeMode()
+        service.refreshCatalogState()
+      }
       return
     }
   }
@@ -1018,13 +1130,20 @@ Item {
       if (service.monitors[i].name === entry.previousMonitor) monitor = service.monitors[i]
     if (!monitor && service.monitors.length === 0) return
     var workspace = entry.previousWorkspace
+    if (Model.isManagedSpecial(workspace)) workspace = ""
     if (!monitor) {
       monitor = Model.monitorForName(service.monitors, "")
-      workspace = monitor ? (monitor.specialWorkspace || monitor.activeWorkspace || win.workspace) : win.workspace
+      var shownSpecial = monitor ? String(monitor.specialWorkspace || "") : ""
+      workspace = monitor
+        ? (shownSpecial !== "" && !Model.isManagedSpecial(shownSpecial)
+            ? shownSpecial : String(monitor.activeWorkspace || ""))
+        : ""
+      if (!workspace) workspace = win.workspace
+      if (Model.isManagedSpecial(workspace)) workspace = ""
       if (monitor) {
         entry = Object.assign({}, entry, { previousMonitor: monitor.name, previousWorkspace: workspace })
         service.registryNext(appId, entry)
-        service.moveWindowToWorkspace(win.address, workspace, false)
+        if (workspace) service.moveWindowToWorkspace(win.address, workspace, false)
       }
     }
     var geometry = Model.geometryFor(monitor, service.config.settings.geometry, app.geometry)
@@ -1156,17 +1275,16 @@ Item {
   }
 
   function opacityExpr(address, value) {
+    var opacity = Number(value)
+    if (!isFinite(opacity)) opacity = 1
+    opacity = Math.max(0, Math.min(1, opacity))
     return "hl.dsp.window.set_prop({ window = " + Shortcuts.luaString(service.windowSelector(address)) +
-      ", prop = \"opacity\", value = \"" + String(value) + "\" })"
+      ", prop = \"opacity\", value = " + Shortcuts.luaString(String(opacity)) + " })"
   }
 
   function restoreWindowOpacity(address) {
     if (!Model.validAddress(address)) return
     service.hypr(service.opacityExpr(address, "1"))
-  }
-
-  function floatWindow(address) {
-    service.hypr(service.floatExpr(address))
   }
 
   function unfloatWindow(address) {
@@ -1185,14 +1303,6 @@ Item {
     service.hypr(service.placeExpr(address, x, y))
   }
 
-  function unsetFullscreen(address, win) {
-    var expr = service.unsetFullscreenExpr(address, win)
-    if (expr) service.hypr(expr)
-  }
-
-  function zOrderTop(address) {
-    service.hypr(service.zOrderTopExpr(address))
-  }
 
   // Parked windows carry a stable tag so other launchers/docks (e.g. Quay)
   // can filter them out of their app lists. Remove it when the window is
@@ -1206,6 +1316,22 @@ Item {
   function tagWindow(address, hidden) {
     if (!Model.validAddress(address)) return
     service.hypr(service.tagExpr(address, hidden))
+  }
+
+  // Turn a window parked by the launch preemption (floating, opacity 0,
+  // tagged hidden) back into an ordinary window on a real workspace. Used
+  // when the app was disabled or disappeared while it was starting, and for
+  // unknown orphan windows, so a ghost can never stay invisible.
+  function releaseWindowToWorkspace(address, workspace) {
+    if (!Model.validAddress(address)) return
+    var target = String(workspace || "")
+    if (!target || Model.isManagedSpecial(target)) target = "1"
+    service.hyprBatch([
+      service.unfloatExpr(address),
+      service.opacityExpr(address, "1"),
+      service.tagExpr(address, false),
+      service.moveWorkspaceExpr(address, target, false)
+    ])
   }
 
   // ---- Client-window reveal ------------------------------------------------
@@ -1249,6 +1375,10 @@ Item {
 
   function startFade(address) {
     if (!address) return
+    // If a previous reveal was interrupted, restore its window to opacity 1
+    // instead of abandoning it mid-fade.
+    if (service.fadeAddress && Model.normalizeAddress(service.fadeAddress) !== Model.normalizeAddress(address))
+      service.restoreWindowOpacity(service.fadeAddress)
     service.fadeAddress = address
     service.fadeQueue = ["0.25", "0.5", "0.75", "1"]
     fadeTimer.restart()
@@ -1259,19 +1389,6 @@ Item {
     service.fadeAddress = ""
     service.fadeQueue = null
     fadeTimer.stop()
-  }
-
-  Timer {
-    id: shellArriveTimeout
-    interval: 500
-    onTriggered: {
-      // Overlay missing or reloading: reveal the window directly.
-      if (service.shellPending && !service.shellArrivedFlag) {
-        service.startFade(service.shellPending)
-        service.shellOpacity = 0
-        shellHideTimer.restart()
-      }
-    }
   }
 
   Timer {
@@ -1307,7 +1424,10 @@ Item {
     service.shellScreen = String(monitor.name || "")
     service.shellW = Math.round(geometry.width)
     service.shellH = Math.round(geometry.height)
-    service.shellDuration = Math.max(120, Number(duration || 180))
+    // A configured 0 ms duration means "no slide", not "use the default".
+    var durationMs = Number(duration)
+    if (!isFinite(durationMs) || durationMs < 0) durationMs = 180
+    service.shellDuration = durationMs
     service.shellOpacity = 1
     // Position at the start while inactive (no animation), activate, wait one
     // compositor frame so the card is painted at the start, then move to the
@@ -1322,11 +1442,10 @@ Item {
       y: Math.round(geometry.y - monitor.y)
     }
     shellMoveTimer.restart()
-    // Arrival is driven by a service timer, and the fallback below guarantees
-    // the window fades in even if the shell never rendered.
+    // Arrival is driven by a service timer; the card is rendered by this
+    // service object, so no overlay round-trip or fallback timer is needed.
     shellArriveTimer.interval = service.shellDuration + 100
     shellArriveTimer.restart()
-    shellArriveTimeout.restart()
   }
 
   Timer {
@@ -1349,11 +1468,10 @@ Item {
     }
   }
 
-  // Called by the overlay once the shell reached the final geometry.
+  // Called by shellArriveTimer once the card has had its full slide time.
   function shellArrived(address) {
     if (!service.shellPending || service.shellPending !== String(address || "")) return
     service.shellArrivedFlag = true
-    shellArriveTimeout.stop()
     service.startFade(address)
     service.focusWindow(address)
     shellDismissTimer.restart()
@@ -1363,7 +1481,6 @@ Item {
     service.cancelFade()
     service.shellPending = ""
     service.shellArrivedFlag = false
-    shellArriveTimeout.stop()
     shellArriveTimer.stop()
     shellDismissTimer.stop()
     shellHideTimer.stop()
@@ -1388,13 +1505,18 @@ Item {
   }
 
   function forgetApp(appId) {
-    service.cancelSlide()
-    service.leaveEscapeMode()
+    var wasCurrent = service.currentAppId === appId
+    // Forgetting an unrelated app must not cancel a reveal in progress or
+    // disarm the Escape submap of the window that is actually visible.
+    if (wasCurrent) {
+      service.cancelSlide()
+      service.leaveEscapeMode()
+    }
     if (!service.registry[appId]) return
     if (Model.validAddress(service.registry[appId].address))
       service.restoreWindowOpacity(service.registry[appId].address)
     service.registryNext(appId, null)
-    if (service.currentAppId === appId) service.currentAppId = ""
+    if (wasCurrent) service.currentAppId = ""
     if (service.lastAppId === appId) service.lastAppId = ""
     service.scheduleStateSave()
     service.refreshCatalogState()
@@ -1411,7 +1533,7 @@ Item {
       if (!app.enabled || (app.system !== "terminal" && app.system !== "agent")) continue
       var orphan = service.adoptableOrphan(app)
       if (!orphan) continue
-      var special = service.availableSpecial(app.id)
+      var special = Model.specialWorkspace(app.id)
       service.moveWindowToWorkspace(orphan.address, special, false)
       service.tagWindow(orphan.address, true)
       if (service.registry[app.id]) {
@@ -1490,22 +1612,57 @@ Item {
     service.checkCloseWatches()
   }
 
+  // Older builds parked every app on the shared unnamed special workspace.
+  // Move parked windows to their own workspace once the registry and the
+  // client list agree, so Alt-Tab never shows a pile of hidden apps and no
+  // window keeps a position from another monitor's scratchpad. Idempotent:
+  // entries already on their own workspace are skipped.
+  function migrateLegacyParking() {
+    if (!service.configLoaded || !service.stateLoaded) return
+    var changed = false
+    for (var id in service.registry) {
+      var entry = service.registry[id]
+      if (!entry || entry.hidden !== true) continue
+      if (service.currentAppId === id || service.launching[id]) continue
+      var target = Model.specialWorkspace(id)
+      if (String(entry.special || "") === target) continue
+      var win = service.clientByAddress(entry.address)
+      if (!win) continue
+      // Only move a window that is still parked where it was recorded.
+      if (String(win.workspace || "") !== String(entry.special || "")) continue
+      service.moveWindowToWorkspace(win.address, target, false)
+      service.registryNext(id, Object.assign({}, entry, { special: target }))
+      changed = true
+    }
+    if (changed) {
+      service.scheduleStateSave()
+    }
+  }
+
   function recoverOrphans() {
     if (!service.configLoaded) return
+    // Every address already owned by a registry entry, including the dialogs
+    // parked with it, must be left alone.
     var managed = {}
     for (var id in service.registry) {
       var entry = service.registry[id]
-      managed[String(entry.address).toLowerCase()] = true
-      managed[String(entry.special)] = true
+      var address = Model.normalizeAddress(entry.address)
+      if (address) managed[address] = true
+      var siblings = entry.siblings || []
+      for (var s = 0; s < siblings.length; s++) {
+        var siblingAddress = Model.normalizeAddress(siblings[s])
+        if (siblingAddress) managed[siblingAddress] = true
+      }
     }
     for (var i = 0; i < service.clients.length; i++) {
       var win = service.clients[i]
-      if (service.released[Model.normalizeAddress(win.address)]) continue
+      var winAddress = Model.normalizeAddress(win.address)
+      if (!winAddress || service.released[winAddress]) continue
       if (!Model.isManagedSpecial(win.workspace)) continue
-      if (managed[String(win.address).toLowerCase()]) continue
+      if (managed[winAddress]) continue
       var app = null
       for (var j = 0; j < service.catalog.length; j++) {
-        if ("special:" + Model.specialWorkspace(service.catalog[j].id) === win.workspace) { app = service.catalog[j]; break }
+        if (Model.specialWorkspace(service.catalog[j].id) === win.workspace) { app = service.catalog[j]; break }
       }
       // Shared unnamed special: match by window class/title instead.
       if (!app && (win.workspace === "special" || win.workspace === "special:special")) {
@@ -1515,7 +1672,14 @@ Item {
           if (Model.windowMatches(candidate, win)) { app = candidate; break }
         }
       }
-      if (app && app.enabled && !service.registry[app.id] && !service.launching[app.id]) {
+      if (app && app.enabled) {
+        if (service.registry[app.id] || service.launching[app.id]) {
+          // A dialog of a managed app, or a window parked by an in-flight
+          // launch. Keep it on the parking workspace; never relocate it.
+          service.tagWindow(win.address, true)
+          managed[winAddress] = true
+          continue
+        }
         // A shell crash left a parked window behind: adopt it as hidden so the
         // user can call it back instead of it being unreachable.
         var adopted = {
@@ -1524,8 +1688,9 @@ Item {
           pid: win.pid,
           hidden: true,
           special: win.workspace,
-          previousWorkspace: win.workspace,
-          previousMonitor: service.monitors.length > 0 ? service.monitors[0].name : "",
+          previousWorkspace: "",
+          previousMonitor: service.monitorNameForId(win.monitor)
+            || (service.monitors.length > 0 ? service.monitors[0].name : ""),
           previousFocus: "",
           since: Date.now()
         }
@@ -1533,14 +1698,21 @@ Item {
         service.tagWindow(win.address, true)
         service.lastAppId = app.id
         service.scheduleStateSave()
-        managed[String(win.address).toLowerCase()] = true
+        managed[winAddress] = true
         continue
       }
-      // Unknown or disabled app: put the window back on a real workspace so no
-      // session is ever trapped in a special workspace.
-      var target = service.workspaceForWindow(win)
-      service.hyprDetached("hl.dsp.window.move({ workspace = " + Shortcuts.luaString(target) +
-        ", follow = false, window = " + Shortcuts.luaString(service.windowSelector(win.address)) + " })")
+      // A window matching an app that is still launching belongs to that
+      // launch; leave it parked and let finishLaunch adopt it.
+      var launchingOwner = false
+      for (var lid in service.launching) {
+        var launchingApp = service.findApp(lid)
+        if (launchingApp && Model.windowMatches(launchingApp, win)) { launchingOwner = true; break }
+      }
+      if (launchingOwner) continue
+      // Unknown or disabled app: put the window back on a real workspace and
+      // undo any preemption effect, so no session is ever trapped invisible
+      // in a special workspace.
+      service.releaseWindowToWorkspace(win.address, service.workspaceForWindow(win))
     }
   }
 
@@ -1549,15 +1721,18 @@ Item {
     var saved = service.savedRegistry || {}
     var changed = false
     for (var id in saved) {
-      if (service.registry[id]) continue
+      if (service.registry[id] || service.launching[id]) continue
       var app = service.findApp(id)
       if (!app || !app.enabled) continue
       var win = service.clientByAddress(saved[id].address)
       if (!win) continue
       if (service.released[Model.normalizeAddress(win.address)]) continue
-      if (saved[id].class && saved[id].class.toLowerCase() !== String(win.class).toLowerCase()) continue
+      // A forged state entry must not be able to adopt an arbitrary window.
+      // Every entry written by this service carries the window class.
+      if (!saved[id].class) continue
+      if (saved[id].class.toLowerCase() !== String(win.class).toLowerCase()) continue
       var hidden = Model.isManagedSpecial(win.workspace)
-      var parkTarget = hidden ? win.workspace : service.availableSpecial(id)
+      var parkTarget = hidden ? win.workspace : Model.specialWorkspace(id)
       if (!hidden) {
         // A window that was visible when the session ended must not pop back
         // up at startup: park it, only an explicit recall shows it again.
@@ -1577,6 +1752,9 @@ Item {
     }
   }
 
+  // A real workspace for a window that must leave a parking workspace. Never
+  // return another special: moving an unknown window onto it would hide it
+  // somewhere the user cannot reach.
   function workspaceForWindow(win) {
     var monitor = null
     for (var i = 0; i < service.monitors.length; i++)
@@ -1584,8 +1762,8 @@ Item {
     if (!monitor) for (var j = 0; j < service.monitors.length; j++)
       if (service.monitors[j].focused) monitor = service.monitors[j]
     if (monitor) {
-      if (monitor.specialWorkspace) return monitor.specialWorkspace
-      if (monitor.activeWorkspace) return monitor.activeWorkspace
+      var active = String(monitor.activeWorkspace || "")
+      if (active && !Model.isManagedSpecial(active)) return active
     }
     return "1"
   }
@@ -1622,10 +1800,94 @@ Item {
     // terminated with the service. The unique app-id class is how the new
     // window is recognised.
     // execDetached is void: the window appearing is the success signal.
-    service.launchViaHypr(cmd, appId)
+    // Arm the compositor first: hypr/dropdown.lua registers a window.open
+    // handler that floats the window, moves it to its parking workspace and
+    // makes it transparent in the same compositor pass that maps it. This is
+    // the only mechanism that also catches windows created by an
+    // already-running browser/Electron process, whose class the window-rule
+    // engine cannot see in time.
+    service.armLaunch(appId, app, function() {
+      service.launchViaHypr(cmd)
+    })
     launchWatchTimer.restart()
     service.notify("Launching " + app.name + "…")
     service.refreshCatalogState()
+  }
+
+  // ---- Launch preemption ---------------------------------------------------
+  // The compositor holds one pending entry per app while its launch is in
+  // flight. It expires after 30 s, so a shell crash can never leave a stale
+  // entry that keeps parking new windows.
+
+  property var launchArmQueue: []
+  property var launchArmCurrent: null
+
+  function armLaunchLua(appId, entry) {
+    return "_dropdownPending = _dropdownPending or {}; _dropdownPending[" +
+      Shortcuts.luaString(appId) + "] = { class = " + Shortcuts.luaString(entry.class || "") +
+      ", title = " + Shortcuts.luaString(entry.title || "") +
+      ", workspace = " + Shortcuts.luaString(entry.workspace) +
+      ", expires = os.time() + 30 }"
+  }
+
+  Process {
+    id: launchArmProc
+    stderr: StdioCollector {
+      id: launchArmError
+      waitForEnd: true
+    }
+    onExited: function(code) {
+      if (Number(code) !== 0) {
+        var detail = String(launchArmError.text || "").trim().split("\n")[0]
+        console.warn("omarchy-dropdown: launch preemption unavailable" +
+          (detail ? ": " + detail : " (exit " + code + ")"))
+      }
+      var current = service.launchArmCurrent
+      service.launchArmCurrent = null
+      if (current && typeof current.callback === "function") current.callback()
+      // Autostart can request several entries before the first eval returns.
+      Qt.callLater(function() { service.pumpLaunchArm() })
+    }
+  }
+
+  function armLaunch(appId, app, callback) {
+    var cls = Model.launchClassMatch(app)
+    var entry = {
+      class: cls,
+      // A title is only a fallback for apps with no usable class. Matching a
+      // page-controlled title when the class is known would let a browser
+      // tab that happens to carry the app name be parked by mistake.
+      title: cls === "" ? Model.launchTitleMatch(app) : "",
+      workspace: Model.specialWorkspace(appId)
+    }
+    // Nothing predictable to match: launch directly, the openwindow fallback
+    // and the 20 s adoption watcher still apply.
+    if (entry.class === "" && entry.title === "") {
+      if (typeof callback === "function") Qt.callLater(callback)
+      return
+    }
+    service.launchArmQueue.push({
+      appId: String(appId),
+      entry: entry,
+      callback: typeof callback === "function" ? callback : null
+    })
+    service.pumpLaunchArm()
+  }
+
+  function pumpLaunchArm() {
+    if (launchArmProc.running) return
+    if (service.launchArmQueue.length === 0) return
+    var item = service.launchArmQueue.shift()
+    service.launchArmCurrent = item
+    launchArmProc.command = ["hyprctl", "eval", service.armLaunchLua(item.appId, item.entry)]
+    launchArmProc.running = true
+  }
+
+  // Fire and forget: the reveal must not wait for the compositor to forget
+  // the entry, and the 30 s expiry is the safety net.
+  function disarmLaunch(appId) {
+    Quickshell.execDetached(["hyprctl", "eval",
+      "if _dropdownPending then _dropdownPending[" + Shortcuts.luaString(appId) + "] = nil end"])
   }
 
   Timer {
@@ -1656,26 +1918,10 @@ Item {
     return null
   }
 
-  function shellQuote(value) {
-    return "'" + String(value || "").replace(/'/g, "'\\''") + "'"
-  }
-
-  // Launch through Hyprland with window rules: the new window maps directly
-  // on its parked special workspace, floating and transparent. It therefore
-  // never appears at its default tiled position before Dropdown adopts it.
-  // A named special workspace can only be created by this Hyprland build at
-  // window-map time. If the preferred one does not exist yet (e.g. an app that
-  // was not launched through Dropdown), park on the unnamed special instead:
-  // it is created on demand and always accepts a window move.
-  function availableSpecial(appId) {
-    var name = Model.specialWorkspace(appId)
-    var full = "special:" + name
-    var list = Hyprland.workspaces && Hyprland.workspaces.values ? Hyprland.workspaces.values : []
-    for (var i = 0; i < list.length; i++) {
-      if (String(list[i].name || "") === full) return name
-    }
-    return "special"
-  }
+  // Every app gets its own named special workspace. Hyprland creates it the
+  // first time the app is parked (a window move creates the workspace on
+  // demand), so unrelated hidden apps never share one scratch workspace and
+  // the unnamed special is left to the user.
 
   // Is a parking special workspace currently shown on some monitor? A parked
   // window can be revealed by Alt-Tab or a dock, which activates its special.
@@ -1690,13 +1936,18 @@ Item {
     return false
   }
 
-  function launchViaHypr(cmd, appId) {
+  function launchViaHypr(cmd) {
     if (!cmd || !cmd.argv || cmd.argv.length === 0) return false
-    var command = cmd.argv.map(function(part) { return service.shellQuote(part) }).join(" ")
-    if (cmd.cwd) command = "cd " + service.shellQuote(cmd.cwd) + " && " + command
-    var special = service.availableSpecial(appId)
+    var command = cmd.argv.map(function(part) { return Shortcuts.shellQuote(part) }).join(" ")
+    if (cmd.cwd) command = "cd " + Shortcuts.shellQuote(cmd.cwd) + " && " + command
+    // Fallback only: the compositor window.open hook is what actually parks
+    // the window. Exec rules follow the spawned PID and cannot apply to a
+    // window created by an already-running browser process. This rule targets
+    // the unnamed special because Hyprland drops a `special:name silent`
+    // target it cannot create in the same pass; the openwindow preempt then
+    // moves the window to its own named special.
     service.hyprDetached("hl.dsp.exec_cmd(" + Shortcuts.luaString(command) + ", { workspace = " +
-      Shortcuts.luaString("special:" + special + " silent") +
+      Shortcuts.luaString("special:special silent") +
       ", float = true, opacity = \"0\" })")
     return true
   }
@@ -1764,14 +2015,19 @@ Item {
   }
 
   function finishLaunch(appId, win, state) {
+    service.disarmLaunch(appId)
     var app = service.findApp(appId)
-    if (!app) return
+    var orphanTarget = state.context && state.context.workspace
+      ? state.context.workspace : service.workspaceForWindow(win)
+    // The compositor already floated and made the window transparent. If the
+    // app vanished or was disabled while it was starting, undo that instead
+    // of leaving an untracked invisible window behind.
+    if (!app) {
+      service.releaseWindowToWorkspace(win.address, orphanTarget)
+      return
+    }
     if (!app.enabled || app.state === "error") {
-      // Disabled while it was starting: leave the new window as an ordinary
-      // window on the target workspace.
-      var target = state.context && state.context.workspace ? state.context.workspace : service.workspaceForWindow(win)
-      service.hyprDetached("hl.dsp.window.move({ workspace = " + Shortcuts.luaString(target) +
-        ", follow = false, window = " + Shortcuts.luaString(service.windowSelector(win.address)) + " })")
+      service.releaseWindowToWorkspace(win.address, orphanTarget)
       return
     }
     var entry = {
@@ -1779,7 +2035,7 @@ Item {
       class: win.class,
       pid: win.pid,
       hidden: false,
-      special: service.availableSpecial(appId),
+      special: Model.specialWorkspace(appId),
       previousWorkspace: state.context ? state.context.workspace : "",
       previousMonitor: state.context ? state.context.monitor : "",
       previousFocus: "",
@@ -1791,7 +2047,7 @@ Item {
       service.parkApp(appId, false)
       return
     }
-    service.revealApp(appId, state.context, win, true)
+    service.revealApp(appId, state.context, win)
   }
 
   function handleLaunchTimeout(appId) {
@@ -1841,7 +2097,7 @@ Item {
     for (var i = 0; i < service.clients.length; i++) {
       var win = service.clients[i]
       if (service.addressManaged(win.address)) continue
-      if (Model.windowMatches(app, win)) return win
+      if (Model.windowMatchesClass(app, win)) return win
     }
     return null
   }
@@ -1860,6 +2116,7 @@ Item {
   }
 
   function failLaunch(appId, message) {
+    service.disarmLaunch(appId)
     var next = {}
     for (var id in service.launching) if (id !== appId) next[id] = service.launching[id]
     service.launching = next
@@ -1910,8 +2167,12 @@ Item {
     if (!monitorName && Hyprland.focusedMonitor) monitorName = String(Hyprland.focusedMonitor.name || "")
     var monitor = service.liveMonitor(monitorName)
     var special = monitor ? monitor.specialWorkspace : null
+    // A dropdown shown from a focus on a parked window must not treat its
+    // parking workspace as the destination.
+    if (special && special.name && Model.isManagedSpecial(special.name)) special = null
     var ws = special && special.name ? special : (monitor ? monitor.activeWorkspace : null)
     var workspace = ws ? String(ws.name || "") : ""
+    if (Model.isManagedSpecial(workspace)) workspace = ""
     if (!workspace && Hyprland.focusedWorkspace) workspace = String(Hyprland.focusedWorkspace.name || "")
     return { monitor: monitorName || (monitor ? String(monitor.name || "") : ""), workspace: workspace }
   }
@@ -1966,7 +2227,7 @@ Item {
           class: existing.class,
           pid: existing.pid,
           hidden: false,
-          special: service.availableSpecial(appId),
+          special: Model.specialWorkspace(appId),
           previousWorkspace: ctx.workspace,
           previousMonitor: ctx.monitor,
           previousFocus: "",
@@ -1990,21 +2251,29 @@ Item {
     var fixed = service.configuredScreen()
     var targetName = fixed || String(ctx.monitor || "")
     var workspace = String(ctx.workspace || "")
+    // A managed parking workspace is never a real destination. Old state
+    // files recorded it as `previousWorkspace`, which used to send restored
+    // and popped-out windows back onto a hidden special.
+    if (Model.isManagedSpecial(workspace)) workspace = ""
     var monitor = service.liveMonitor(targetName)
     if (monitor) {
       // A pinned screen always uses that screen's current workspace, never a
       // stale workspace captured before a workspace switch.
       if (fixed || !workspace) {
         var special = monitor.specialWorkspace
-        var ws = special && special.name ? special : monitor.activeWorkspace
+        var ws = special && special.name && !Model.isManagedSpecial(special.name)
+          ? special : monitor.activeWorkspace
         if (ws && ws.name) workspace = String(ws.name)
       }
       ctx.monitor = String(monitor.name || targetName)
     } else {
       var cached = Model.monitorForName(service.monitors, targetName)
       if (cached) {
-        if (fixed || !workspace)
-          workspace = String(cached.specialWorkspace || cached.activeWorkspace || workspace)
+        if (fixed || !workspace) {
+          var cachedSpecial = String(cached.specialWorkspace || "")
+          workspace = !Model.isManagedSpecial(cachedSpecial) && cachedSpecial !== ""
+            ? cachedSpecial : String(cached.activeWorkspace || workspace)
+        }
         ctx.monitor = String(cached.name || targetName)
       }
     }
@@ -2012,10 +2281,22 @@ Item {
     return { monitor: ctx.monitor || "", workspace: workspace }
   }
 
-  function revealApp(appId, context, knownWindow, fresh) {
+  function revealApp(appId, context, knownWindow, monitorsRetried) {
     var app = service.findApp(appId)
     var entry = service.registry[appId]
     if (!app || !entry) return
+    // No monitor data means no safe absolute placement: geometryFor(null)
+    // would return (0, 0), which is off-screen on a layout whose first output
+    // does not start at the origin. Refresh once and retry, then give up and
+    // leave the window parked rather than placing it where the user cannot
+    // reach it.
+    if (!service.monitors || service.monitors.length === 0) {
+      if (monitorsRetried === true) return
+      service.refreshMonitors(function() {
+        service.revealApp(appId, context, knownWindow, true)
+      })
+      return
+    }
     var win = knownWindow || service.clientByAddress(entry.address)
     if (!win) { service.forgetApp(appId); return }
     var ctx = service.resolveContext(context || {
@@ -2055,6 +2336,7 @@ Item {
       previousWorkspace: ctx.workspace,
       previousMonitor: ctx.monitor,
       previousFocus: previousFocus,
+      parkedAt: 0,
       lastShownAt: Date.now()
     })
     service.registryNext(appId, updated)
@@ -2076,15 +2358,17 @@ Item {
     }
     // A single batch: leave fullscreen, float, resize, move to the target
     // workspace and place at the final geometry. The window then fades in.
-    var freshWindow = fresh === true
     var fade = service.revealMotionEnabled()
     var batch = []
     var fs = service.unsetFullscreenExpr(win.address, win)
     if (fs) batch.push(fs)
     batch.push(service.floatExpr(win.address))
     // Invisible during placement; a fresh window also stays invisible while
-    // it paints, so no grey/white block is shown.
+    // it paints, so no grey/white block is shown. The compositor hook already
+    // mapped it at opacity 0, so a reduced-motion reveal must restore it
+    // explicitly instead of relying on the fade.
     if (fade) batch.push(service.opacityExpr(win.address, "0"))
+    else batch.push(service.opacityExpr(win.address, "1"))
     batch.push(service.resizeExpr(win.address, geometry.width, geometry.height))
     batch.push(service.moveWorkspaceExpr(win.address, ctx.workspace, false))
     batch.push(service.placeExpr(win.address, geometry.x, geometry.y))
@@ -2131,7 +2415,9 @@ Item {
     // Never leave a window transparent after an interrupted reveal.
     service.restoreWindowOpacity(win.address)
     var app = service.findApp(appId)
-    var special = service.availableSpecial(appId)
+    // Each app has its own special workspace; the move creates it on demand.
+    var special = Model.specialWorkspace(appId)
+    var short = special.indexOf("special:") === 0 ? special.slice(8) : special
     var siblings = []
     // Dialog windows of a dedicated instance share its class and pid. Never
     // sweep every window of a file manager, whose class is shared with
@@ -2152,19 +2438,23 @@ Item {
     // If the window was revealed through its special workspace (Alt-Tab or a
     // dock), moving it back there is not enough: close the special as well.
     if (specialWasShown) {
-      if (special === "special" || special === "special:special")
-        service.hypr("hl.dsp.workspace.toggle_special()")
-      else
-        service.hypr("hl.dsp.workspace.toggle_special(" + Shortcuts.luaString(special) + ")")
+      service.hypr("hl.dsp.workspace.toggle_special(" + Shortcuts.luaString(short) + ")")
     }
     service.tagWindow(win.address, true)
     for (var k = 0; k < siblings.length; k++) service.tagWindow(siblings[k], true)
+    // Hiding a window that is already on a special workspace (it was adopted
+    // from Alt-Tab) must not overwrite the real workspace it came from, or a
+    // later pop-out/restore sends it back to a hidden special.
+    var onSpecial = Model.isManagedSpecial(win.workspace)
+    var previousWorkspace = onSpecial ? entry.previousWorkspace : win.workspace
+    if (Model.isManagedSpecial(previousWorkspace)) previousWorkspace = ""
     var updated = Object.assign({}, entry, {
       hidden: true,
       special: special,
       siblings: siblings,
-      previousWorkspace: win.workspace,
-      previousMonitor: service.monitorNameForId(win.monitor)
+      parkedAt: Date.now(),
+      previousWorkspace: previousWorkspace,
+      previousMonitor: onSpecial ? entry.previousMonitor : service.monitorNameForId(win.monitor)
     })
     service.registryNext(appId, updated)
     if (service.currentAppId === appId) service.currentAppId = ""
@@ -2217,7 +2507,11 @@ Item {
       service.revealApp(appId, context || service.focusedContext())
     }
     service.closeWindow(win.address)
-    service.closeWatches[appId] = Date.now()
+    var watches = {}
+    for (var watchId in service.closeWatches) watches[watchId] = service.closeWatches[watchId]
+    watches[appId] = Date.now()
+    service.closeWatches = watches
+    closeWatchTimer.restart()
     service.notify("Closing " + app.name + "…")
     service.scheduleStateSave()
     service.refreshCatalogState()
@@ -2238,7 +2532,20 @@ Item {
       var app = service.findApp(id)
       service.notify((app ? app.name : id) + " is waiting for confirmation.")
     }
-    if (changed) service.closeWatches = next
+    if (changed) {
+      service.closeWatches = next
+      service.refreshCatalogState()
+    }
+    if (Object.keys(service.closeWatches).length > 0) closeWatchTimer.restart()
+    else closeWatchTimer.stop()
+  }
+
+  // A close request is not always answered by a client event; expire the
+  // "waiting for confirmation" notice even when the client list is stable.
+  Timer {
+    id: closeWatchTimer
+    interval: Math.max(1000, service.closeConfirmMs + 100)
+    onTriggered: service.checkCloseWatches()
   }
 
   function hideVisibleCurrent() {
@@ -2288,8 +2595,10 @@ Item {
       class: win.class,
       pid: win.pid,
       hidden: Model.isManagedSpecial(win.workspace),
-      special: service.availableSpecial(appId),
-      previousWorkspace: win.workspace,
+      special: Model.isManagedSpecial(win.workspace) ? String(win.workspace) : Model.specialWorkspace(appId),
+      // A window adopted while already parked has no real workspace to
+      // remember; storing the special would send it back there on restore.
+      previousWorkspace: Model.isManagedSpecial(win.workspace) ? "" : win.workspace,
       previousMonitor: service.monitorNameForId(win.monitor),
       previousFocus: "",
       since: Date.now()
@@ -2369,9 +2678,26 @@ Item {
     if (enabled) {
       var system = Model.enabledSystemMap(next)
       if (app.kind === "system") system[app.system] = true
-      var key = cfg.key || (app.kind === "system" ? Model.SYSTEM_KEYS[app.system] : Model.firstFreeKey(app.name, service.usedKeys(), Model.reservedKeys(system)))
+      var reserved = Model.reservedKeys(system)
+      var commands = service.config.settings.commands
+      var key = String(cfg.key || "")
+      if (!key && app.kind === "system") {
+        // Prefer the conventional t/i/f key, but never fail activation just
+        // because another app already owns it.
+        var conventional = Model.SYSTEM_KEYS[app.system]
+        if (conventional && Model.validateKey(conventional, appId, service.catalog, system, commands).ok)
+          key = conventional
+      }
+      if (!key) key = Model.firstFreeKey(app.name, service.usedKeys(), reserved)
       if (!key) return { ok: false, message: "No free key available for " + app.name + "." }
-      var check = Model.validateKey(key, appId, service.catalog, system, service.config.settings.commands)
+      var check = Model.validateKey(key, appId, service.catalog, system, commands)
+      if (!check.ok) {
+        var fallback = Model.firstFreeKey(app.name, service.usedKeys(), reserved)
+        if (fallback && fallback !== key) {
+          key = fallback
+          check = Model.validateKey(key, appId, service.catalog, system, commands)
+        }
+      }
       if (!check.ok) return { ok: false, message: check.error }
       cfg.key = key
       if (cfg.shortcut) {
@@ -2435,6 +2761,7 @@ Item {
   }
 
   function cancelShortcutRequest() {
+    bindsCheckTimeout.stop()
     service.pendingShortcut = null
   }
 
@@ -2468,10 +2795,25 @@ Item {
       return { ok: false, message: "A shortcut check is already running." }
     service.pendingShortcut = { appId: appId, chord: chord }
     bindsCheckProc.running = true
+    bindsCheckTimeout.restart()
     return { ok: true, pending: true, shortcut: chord }
   }
 
+  // A missing/failed `hyprctl binds` must not leave the capture UI stuck on
+  // "Checking" forever and block every later shortcut assignment.
+  Timer {
+    id: bindsCheckTimeout
+    interval: 4000
+    onTriggered: {
+      var pending = service.pendingShortcut
+      if (!pending) return
+      service.pendingShortcut = null
+      service.shortcutRejected(pending.appId, "Hyprland did not answer the shortcut check. Try again.")
+    }
+  }
+
   function finishShortcutCheck(raw) {
+    bindsCheckTimeout.stop()
     var pending = service.pendingShortcut
     service.pendingShortcut = null
     if (!pending) return
@@ -2514,7 +2856,7 @@ Item {
     if (!check.ok) return check
     var next = Model.clone(service.config)
     if (!next.apps[appId]) next.apps[appId] = {}
-    next.apps[appId].key = String(key)
+    next.apps[appId].key = Model.normalizeKeyChar(key)
     service.config = next
     service.saveConfigNow()
     service.rebuildCatalog()
@@ -2616,7 +2958,7 @@ Item {
     onTriggered: {
       var next = service.pendingPaletteOpen
       service.pendingPaletteOpen = null
-      if (next) service.openPalette(next.view, next.monitor)
+      if (next) service.openPalette(next.view, next.monitor, next.force === true)
     }
   }
 
@@ -2627,7 +2969,11 @@ Item {
     // one output for its lifetime, so re-binding is not reliable.
     if (service.paletteOpen && requested && service.paletteMonitor
         && requested !== service.paletteMonitor) {
-      service.pendingPaletteOpen = { view: view || "palette", monitor: requested }
+      service.pendingPaletteOpen = {
+        view: view || "palette",
+        monitor: requested,
+        force: forceMonitor === true
+      }
       if (service.shell && service.shell.hide) service.shell.hide("apach.dropdown")
       paletteReopenTimer.restart()
       return true
@@ -2643,13 +2989,14 @@ Item {
   function toggleFromBar(view, monitorName) {
     if (service.paletteOpen) {
       if (monitorName && service.paletteMonitor && String(monitorName) !== service.paletteMonitor) {
-        service.openPalette(view, monitorName)
+        service.openPalette(view, monitorName, true)
         return
       }
       if (service.shell && service.shell.hide) service.shell.hide("apach.dropdown")
       return
     }
-    service.openPalette(view, monitorName)
+    // The bar widget is per screen: its output wins over the configured one.
+    service.openPalette(view, monitorName, monitorName !== "")
   }
 
   // Running managed windows, in catalog order, for the tab bar and the
@@ -2707,6 +3054,12 @@ Item {
 
   function restoreAll(reason) {
     service.hyprDetached("hl.dsp.submap(\"reset\")")
+    service.cancelSlide()
+    autoHideTimer.stop()
+    launchWatchTimer.stop()
+    focusRestoreTimer.stop()
+    service.focusRestoreAddress = ""
+    for (var launchingId in service.launching) service.disarmLaunch(launchingId)
     for (var id in service.registry) {
       var entry = service.registry[id]
       if (Model.validAddress(entry.address)) {
@@ -2717,19 +3070,32 @@ Item {
       for (var s = 0; s < restoreSiblings.length; s++)
         if (Model.validAddress(restoreSiblings[s])) service.hyprDetached(service.tagExpr(restoreSiblings[s], false))
       if (!entry.hidden) continue
-      var target = entry.previousWorkspace || "1"
-      service.hyprDetached("hl.dsp.window.move({ workspace = " + Shortcuts.luaString(target) +
-        ", follow = false, window = " + Shortcuts.luaString(service.windowSelector(entry.address)) + " })")
+      // Never restore a window onto a Dropdown parking workspace.
+      var target = Model.isManagedSpecial(entry.previousWorkspace) ? "1" : (entry.previousWorkspace || "1")
+      service.hyprDetached(service.moveWorkspaceExpr(entry.address, target, false))
       var siblings = entry.siblings || []
       for (var i = 0; i < siblings.length; i++) {
         if (!Model.validAddress(siblings[i])) continue
-        service.hyprDetached("hl.dsp.window.move({ workspace = " + Shortcuts.luaString(target) +
-          ", follow = false, window = " + Shortcuts.luaString(service.windowSelector(siblings[i])) + " })")
+        service.hyprDetached(service.moveWorkspaceExpr(siblings[i], target, false))
       }
     }
     service.registry = {}
+    service.launching = ({})
+    service.closeWatches = ({})
+    service.errors = ({})
+    service.adoptable = ({})
+    service.released = ({})
+    service.savedRegistry = {}
+    service.pendingShortcut = null
     service.currentAppId = ""
     service.lastAppId = ""
+    service.paletteOpen = false
+    service.paletteTarget = ""
+    service.paletteMonitor = ""
+    service.paletteWorkspace = ""
+    service.palettePreviousFocus = ""
+    service.notice = ""
+    service.saveStateNow()
     console.log("omarchy-dropdown: restored managed windows (" + String(reason || "shutdown") + ")")
   }
 
@@ -2772,6 +3138,7 @@ Item {
     target: Hyprland
     function onActiveToplevelChanged() {
       service.adoptFocusedParked()
+      service.adoptFocusedVisible()
       service.maybeAutoHide()
     }
     function onFocusedWorkspaceChanged() {
@@ -2779,10 +3146,53 @@ Item {
     }
   }
 
+  // The compositor hook parks a launched window before it is painted. This
+  // fallback covers an older ~/.config/hypr/dropdown.lua without the hook, or
+  // a window whose class/title does not match the armed entry. Park it on
+  // the openwindow event instead of letting it sit tiled and visible until
+  // the 35-300 ms client poll adopts it. `follow = false` keeps the special
+  // workspace hidden.
+  function preemptLaunchedWindow(event) {
+    var parts = []
+    try {
+      if (event && typeof event.parse === "function") parts = event.parse(4)
+    } catch (e) {
+      parts = []
+    }
+    if (!parts || parts.length < 3) {
+      var text = String(event && event.data ? event.data : "")
+      if (!text) return
+      parts = text.split(",")
+    }
+    if (parts.length < 3) return
+    var address = Model.normalizeAddress(parts[0])
+    if (!address || service.addressManaged(address)) return
+    // The compositor hook already moved the window to its parking workspace;
+    // the openwindow event reports the workspace it mapped on.
+    if (Model.isManagedSpecial(String(parts[1] || ""))) return
+    var win = {
+      address: address,
+      class: String(parts[2] || ""),
+      initialClass: String(parts[2] || ""),
+      title: parts.slice(3).join(",")
+    }
+    for (var appId in service.launching) {
+      var app = service.findApp(appId)
+      if (!app || !Model.windowMatches(app, win)) continue
+      var batch = []
+      batch.push("dispatch " + service.floatExpr(address))
+      batch.push("dispatch " + service.opacityExpr(address, "0"))
+      batch.push("dispatch " + service.moveWorkspaceExpr(address, Model.specialWorkspace(appId), false))
+      Quickshell.execDetached(["hyprctl", "--batch", batch.join(";")])
+      return
+    }
+  }
+
   Connections {
     target: Hyprland
     function onRawEvent(event) {
       var name = String(event.name || "")
+      if (name === "openwindow") service.preemptLaunchedWindow(event)
       if (name === "monitoradded" || name === "monitorremoved" || name === "monitoraddedv2"
           || name === "configreloaded" || name === "monitorlayout" || name === "monitorlayoutchanged"
           || name === "activespecial" || name === "workspace") {
@@ -2942,11 +3352,10 @@ Item {
   }
 
   function setCommandKey(name, key) {
-    var value = String(key || "")
+    var value = Model.normalizeKeyChar(key)
     var commands = service.config.settings.commands || Model.DEFAULT_COMMANDS
     if (!commands[name]) return { ok: false, message: "Unknown command." }
-    if (value.length !== 1) return { ok: false, message: "Use a single character." }
-    if (value === "\u001b") return { ok: false, message: "Escape is reserved for Reduce." }
+    if (!value) return { ok: false, message: "Use a single printable character; Escape is reserved for Reduce." }
     for (var other in commands) {
       if (other !== name && String(commands[other]) === value)
         return { ok: false, message: "\"" + value + "\" is already used by " + other + "." }
@@ -2979,6 +3388,23 @@ Item {
       if (target) service.hideTarget()
       if (service.shell && service.shell.hide) service.shell.hide("apach.dropdown")
       return { ok: true, message: "" }
+    }
+    if (!service.currentAppId) {
+      // Recover a visible managed window whose current pointer was lost, so
+      // Escape always hides the dropdown that is actually in front.
+      var active = Hyprland.activeToplevel
+      var address = active ? Model.normalizeAddress(active.address) : ""
+      if (address) {
+        for (var id in service.registry) {
+          var entry = service.registry[id]
+          if (Model.normalizeAddress(entry.address) !== address) continue
+          if (entry.hidden === true) break
+          var win = service.clientByAddress(address)
+          if (!win || Model.isManagedSpecial(win.workspace)) break
+          service.currentAppId = id
+          break
+        }
+      }
     }
     if (service.currentAppId) {
       var app = service.findApp(service.currentAppId)
@@ -3023,18 +3449,20 @@ Item {
         stateLoaded: service.stateLoaded,
         bindsLoaded: service.bindsLoaded,
         configDirty: service.configDirty,
-        hyprError: service.hyprError,
+        hyprError: redact ? (service.hyprError ? "an error is recorded" : "") : service.hyprError,
         lastHyprErrorAt: service.lastHyprErrorAt,
-        current: service.currentAppId,
-        last: service.lastAppId,
+        current: redact ? "" : service.currentAppId,
+        last: redact ? "" : service.lastAppId,
         palette: service.paletteOpen,
-        registry: registered,
+        registry: redact ? registered.map(function() { return "app" }) : registered,
         monitors: service.monitors.map(function(m) { return m.name }),
         clients: service.clients.length,
-        launching: Object.keys(service.launching),
-        pendingShortcut: service.pendingShortcut,
-        errors: service.errors,
-        conflicts: service.conflicts,
+        launching: redact
+          ? Object.keys(service.launching).map(function() { return "app" })
+          : Object.keys(service.launching),
+        pendingShortcut: redact ? null : service.pendingShortcut,
+        errors: redact ? {} : service.errors,
+        conflicts: redact ? {} : service.conflicts,
         apps: apps
       }, null, 2)
     }

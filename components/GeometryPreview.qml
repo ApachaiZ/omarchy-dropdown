@@ -12,8 +12,6 @@ Item {
   property real heightPercent: 80
   property real topOffset: 12
   property real reservedTop: 26
-  property real sideMargin: 0
-  property string edge: "top"
   property string placement: "center"
   property real boxWidth: 260
   property real boxHeight: 120

@@ -4,6 +4,85 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.7.14 — 2026-11-03
+
+### Fixed
+
+- A new window is now parked inside the compositor: the service arms
+  `_dropdownPending` and the `window.open` hook in `hypr/dropdown.lua` floats
+  it, moves it to its parking workspace and sets opacity 0 in the same pass
+  that maps it. Chromium and Electron windows created by an already-running
+  browser/Electron process used to appear tiled (visually full-screen) for
+  70–300 ms and reflow neighbouring windows before Dropdown adopted them.
+  The entry expires after 30 s and is cleared on adoption; the `openwindow`
+  dispatch remains as a fallback for an older integration file.
+- Every app is parked on its own `special:dropdown-<app>-<hash>` workspace
+  instead of the shared unnamed special. Windows parked by older builds are
+  migrated silently on the next client refresh.
+- Adopting a parked window from Alt-Tab or a dock re-applies the configured
+  geometry. Hyprland translates parked floating windows when the special
+  moves between outputs, which could leave them partly or fully off-screen.
+- Hiding a window that is already on a parking workspace no longer stores
+  that workspace as `previousWorkspace`; restoring or popping out such a
+  window can no longer send it back to a hidden special.
+- No monitor data is no longer treated as a valid geometry: a reveal waits
+  for the monitor list once instead of placing the window at 0,0, which is
+  off-screen when the layout does not start at the origin.
+- A visible managed window whose current pointer was lost is re-adopted when
+  it gets focus (and by `reduce`), so Escape hides it again instead of
+  requiring the window to be closed.
+- Monitor refresh callbacks are queued instead of overwriting each other.
+- A configured URL is now an identity for apps that wrap a browser PWA
+  without a `StartupWMClass` (MailFlow-style handlers): their Chromium class
+  is matched and preempted at map time instead of waiting for the title to
+  change, which could take much longer than the reveal.
+- Dialog windows parked with an app are no longer relocated out of the
+  special on the next client refresh, and an in-flight launch window is never
+  moved by orphan recovery. An empty or invalid `hyprctl clients/monitors`
+  payload no longer clears the registry and overwrites the state file.
+- A window whose app was disabled or removed during launch is released as an
+  ordinary window (unfloated, opacity restored, tag removed) instead of
+  staying invisible and untracked.
+- The reveal fallback timer no longer preempts long animations or skips the
+  keyboard focus; a configured 0 ms duration is respected.
+- Overlay transient modes (quit, pop out, key/shortcut assignment) are reset
+  on open, close and view changes, so a mode cannot leak into the next palette
+  session. `Ctrl+Tab` can be captured as a direct shortcut.
+- The bar widget now opens on its own output even when a screen is pinned in
+  Settings; a deferred palette move keeps that choice.
+- Activating a system app falls back to a free key when its conventional
+  `t`/`i`/`f` is already taken. App and command keys are normalized to one
+  printable lowercase character.
+- Close-confirmation notices expire without a client event; a stuck
+  `hyprctl binds` check times out; forgetting an unrelated app no longer
+  cancels a reveal or the Escape submap.
+- `restoreAll` clears launch/close/error state, stops timers and saves the
+  empty state; autostart is retried after a config/state load failure; URL
+  migration compares case-insensitively.
+
+### Security
+
+- `luaString` escapes `;`, `[` and `]` so a workspace name cannot break out
+  of a `hyprctl --batch` frame and inject a dispatch. Generated direct binds
+  shell-quote the desktop app id.
+- Config and state reject `__proto__`/`constructor`/`prototype` ids; state
+  adoption requires a matching non-empty window class; existing-window
+  adoption no longer trusts a page-controlled title; every URL write passes
+  `isSafeUrl`.
+- `doctorRedacted` masks current/last app ids, registry and launching ids,
+  errors and conflicts. Opacity values are clamped and quoted; the compositor
+  hook ignores malformed pending entries.
+
+### Changed
+
+- The installer appends the launch preemption hook to an existing
+  `~/.config/hypr/dropdown.lua` when it is missing.
+- Installer backups now live in `~/.config/omarchy/plugin-backups/` instead
+  of inside `~/.config/omarchy/plugins/`. Quickshell scans every directory in
+  the plugin root, and a backup keeps the same manifest id, so the shell
+  could load the previous version instead of the freshly installed one.
+  `uninstall.sh` keeps its removed copy outside the scan root too.
+
 ## 0.7.13 — 2026-11-01
 
 ### Documentation

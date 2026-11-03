@@ -12,6 +12,8 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 | Window workspace, size, address | Hyprland | Dispatch targets, geometry |
 | Desktop entries | Local files, but user-writable | Commands, names, icons |
 | `dropdown.json` | User or another local tool | URLs, geometry, shortcuts |
+| `dropdown-state.json` | User or another local tool | Window adoption, previous workspace |
+| `~/.config/hypr/dropdown.lua` | User-writable Lua loaded by the compositor | Compositor code |
 | IPC arguments (`showApp`, `setShortcut`, …) | Any local process | App ids, chords |
 
 ## Sinks and mitigations
@@ -31,16 +33,37 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   No URL or title ever reaches an `Image.source`.
 - **Process execution**: launches use argv vectors with
   `uwsm-app`/`gtk-launch`/`xdg-terminal-exec`; the Hyprland `exec_cmd` path
-  shell-quotes every argument. There is no `eval`, `sh -c`, `sudo`, `pkill`
-  or `killall` in the plugin.
+  shell-quotes every argument. Generated direct binds pass the desktop app id
+  through `Shortcuts.shellQuote`, so an id containing spaces, quotes or `;`
+  cannot become shell syntax. The only `bash -c` is the constant config-backup
+  prune command; it receives the config path as a positional argument. There
+  is no `sudo`, `pkill` or `killall`.
+- **Compositor Lua**: the launch preemption arms `_dropdownPending` with
+  `hyprctl eval`. User-controlled values (app id, window class fragment, URL
+  host, parking workspace) are passed through `Shortcuts.luaString` and only
+  ever appear inside quoted Lua string literals; the eval chunk is passed as
+  an argv vector, never through a shell. The compositor hook matches them with
+  plain (non-pattern) `string.find`, so a desktop entry cannot turn a window
+  class into a Lua pattern or code.
 - **Hyprland dispatches**: addresses are normalized hex selectors, geometry is
-  numeric and clamped, workspace and shortcut text goes through `luaString`.
-- **Writes**: only `dropdown.json` (atomic, validated), the generated
-  `dropdown-binds.lua`, the local state file, and a bar placement file. No
-  user file outside `~/.config/omarchy` is modified by the running plugin.
+  numeric and clamped, opacity is clamped to 0–1, and workspace/shortcut text
+  goes through `luaString`. `luaString` also escapes `;`, `[` and `]` as Lua
+  decimal sequences because `hyprctl --batch` splits on `;` outside brackets
+  without parsing Lua; a workspace name can therefore never break the batch
+  framing. State and config are treated as untrusted: managed special
+  workspaces are rejected as destinations, and state adoption requires a
+  non-empty window class equal to the live one.
+- **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
+  the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
+  `~/.local/state/omarchy/`, and the bar placement file. The installer also
+  edits `hyprland.lua` and `dropdown.lua` with a backup; plugin backups live in
+  `~/.config/omarchy/plugin-backups/`, outside the plugin scan root.
 - **Network**: none. The only URLs stored are the web-app addresses the user
-  configures; `Model.isSafeUrl` restricts them to plain `http(s)` with no
-  quotes, whitespace or control characters.
+  configures or a desktop entry exposes; every write path applies
+  `Model.isSafeUrl` and restricts them to plain `http(s)` with no quotes,
+  whitespace or control characters. App keys are normalized to one printable
+  lowercase character, and `__proto__`/`constructor`/`prototype` app ids are
+  rejected so a config cannot pollute `Object.prototype`.
 
 ## Checklist for a change
 
@@ -49,8 +72,8 @@ a policy-only review had missed: window titles were rendered as QML rich text.
    If it is an `Image`, it must not be a URL.
 2. Does it pass a value to a process or a Hyprland dispatcher? Use an argv
    vector or `luaString`/`windowSelector`; never interpolate into a shell.
-3. Does it write a file? Keep it under `~/.config/omarchy` or the state dir,
-   write atomically, and validate before writing.
+3. Does it write a file? Keep it under `~/.config/omarchy`, `~/.config/hypr`
+   or the Omarchy state dir, write atomically, and validate before writing.
 4. Does it add an IPC method? Validate types and reject unknown ids; never
    return file contents or tokens.
 5. Run `node --test tests/*.test.mjs`; the QML security test must pass.
@@ -58,6 +81,17 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 
 ## History
 
+- **0.7.14** — audit hardening. `luaString` escapes batch separators
+  (`;[]`) so a workspace name cannot inject a `hyprctl --batch` dispatch;
+  generated bind commands shell-quote the desktop app id; config/state reject
+  `__proto__`-style ids and state adoption requires a matching window class;
+  existing-window adoption no longer trusts a page-controlled title; URL
+  writes all pass `isSafeUrl`; `doctorRedacted` masks every identifier; app
+  keys are one printable lowercase character. The launch preemption itself
+  adds the compositor Lua sink (`hyprctl eval` arming `_dropdownPending`);
+  every user-controlled value is a quoted Lua string literal, matching uses
+  plain `string.find`, and the title fallback is only armed when the app has
+  no class.
 - **0.7.11** — window titles and all dynamic text forced to
   `Text.PlainText`. Reported in the
   [marketplace review](https://github.com/omacom/omarchy-plugin-marketplace/issues/13532).

@@ -16,11 +16,23 @@ try:
     data = json.load(open(src))
 except Exception:
     sys.exit(0)
-layout = (data.get("bar") or {}).get("layout") or {}
+if not isinstance(data, dict):
+    sys.exit(0)
+bar = data.get("bar")
+layout = bar.get("layout") if isinstance(bar, dict) else None
+if not isinstance(layout, dict):
+    sys.exit(0)
 for section in ("left", "center", "right"):
-    for index, entry in enumerate(layout.get(section) or []):
+    entries = layout.get(section)
+    if not isinstance(entries, list):
+        continue
+    for index, entry in enumerate(entries):
         if isinstance(entry, dict) and entry.get("id") == "apach.dropdown":
-            json.dump({"section": section, "index": index}, open(dst, "w"))
+            try:
+                with open(dst, "w") as out:
+                    json.dump({"section": section, "index": index}, out)
+            except Exception:
+                sys.exit(0)
             print("Saved bar placement:", section, index)
             sys.exit(0)
 PLACEMENT
@@ -39,8 +51,12 @@ echo "Disabling apach.dropdown..."
 omarchy plugin disable apach.dropdown >/dev/null 2>&1 || true
 
 if [[ -e $DEST ]]; then
-  mv "$DEST" "$DEST.removed.$STAMP"
-  echo "Moved plugin code to $DEST.removed.$STAMP (delete it when you are satisfied)."
+  # Keep the removed copy outside the plugin scan root, otherwise the shell
+  # still discovers its manifest and keeps loading a dead plugin.
+  BACKUP_DIR="$CONFIG_HOME/omarchy/plugin-backups"
+  mkdir -p "$BACKUP_DIR"
+  mv "$DEST" "$BACKUP_DIR/apach.dropdown.removed.$STAMP"
+  echo "Moved plugin code to $BACKUP_DIR/apach.dropdown.removed.$STAMP (delete it when you are satisfied)."
 fi
 
 HYPR_DIR="$CONFIG_HOME/hypr"
@@ -70,7 +86,7 @@ if [[ -f $HYPR_DIR/dropdown.lua ]]; then
 fi
 
 if command -v hyprctl >/dev/null 2>&1; then
-  hyprctl reload >/dev/null || true
+  hyprctl reload >/dev/null 2>&1 || true
 fi
 
 cat <<EOF

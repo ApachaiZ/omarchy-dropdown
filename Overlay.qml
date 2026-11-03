@@ -8,7 +8,6 @@ import QtQuick
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Wayland
-import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
@@ -120,8 +119,6 @@ Item {
   }
   // The command palette itself is always a top menu; only the managed
   // application window follows the configured slide edge.
-  readonly property string paletteEdge: "top"
-  readonly property bool horizontalEdge: paletteEdge === "top" || paletteEdge === "bottom"
 
   readonly property var targetScreen: {
     var name = overlay.screenName
@@ -169,16 +166,11 @@ Item {
   property real animScale: 1
 
   function edgeOffset(distance) {
-    if (overlay.paletteEdge === "bottom") return -distance
-    if (overlay.paletteEdge === "left") return -distance
-    if (overlay.paletteEdge === "right") return distance
     return -distance
   }
 
   function edgeDistance() {
-    return overlay.paletteEdge === "top"
-      ? Style.bar.sizeHorizontal + Style.space(6)
-      : 16
+    return Style.bar.sizeHorizontal + Style.space(6)
   }
 
   function applyStart() {
@@ -190,10 +182,7 @@ Item {
     if (animMode === "none" || animDuration === 0) return
     if (animFade) animOpacity = 0
     if (animScaleFrom < 1) animScale = animScaleFrom
-    if (animSlideV) {
-      if (overlay.horizontalEdge) animY = overlay.edgeOffset(distance)
-      else animX = overlay.edgeOffset(distance)
-    }
+    if (animSlideV) animY = overlay.edgeOffset(distance)
     if (animSlideH) {
       var screenWidth = window ? window.width : 1200
       var cardW = card ? card.width : overlay.cardWidth
@@ -236,13 +225,38 @@ Item {
     id: hideAnim
     property int duration: 180
     onFinished: overlay.closing = false
-    NumberAnimation { target: overlay; property: "animY"; to: overlay.animSlideV && overlay.horizontalEdge ? overlay.edgeOffset(overlay.edgeDistance()) : 0; duration: hideAnim.duration; easing.type: Easing.InCubic }
-    NumberAnimation { target: overlay; property: "animX"; to: overlay.animSlideH ? -((window ? window.width : 1200) + (card ? card.width : overlay.cardWidth)) / 2 : (overlay.animSlideV && !overlay.horizontalEdge ? overlay.edgeOffset(overlay.edgeDistance()) : 0); duration: hideAnim.duration; easing.type: Easing.InCubic }
+    NumberAnimation { target: overlay; property: "animY"; to: overlay.animSlideV ? overlay.edgeOffset(overlay.edgeDistance()) : 0; duration: hideAnim.duration; easing.type: Easing.InCubic }
+    NumberAnimation { target: overlay; property: "animX"; to: overlay.animSlideH ? -((window ? window.width : 1200) + (card ? card.width : overlay.cardWidth)) / 2 : 0; duration: hideAnim.duration; easing.type: Easing.InCubic }
     NumberAnimation { target: overlay; property: "animOpacity"; to: overlay.animFade ? 0 : 1; duration: hideAnim.duration; easing.type: Easing.InCubic }
     NumberAnimation { target: overlay; property: "animScale"; to: overlay.animScaleFrom; duration: hideAnim.duration; easing.type: Easing.InCubic }
   }
 
   // ---- Lifecycle -----------------------------------------------------------
+
+  // Every way out of the palette must clear the same transient keyboard
+  // modes. Missing one used to leak quit/popout/rebind mode into the next
+  // palette session, where the next key could close an app or rebind a command.
+  function resetShortcutCapture() {
+    if (assigningShortcut && service) service.cancelShortcutRequest()
+    assigningShortcut = false
+    shortcutChecking = false
+    shortcutError = ""
+    shortcutAppId = ""
+    shortcutSuggestion = ""
+    shortcutPendingChord = ""
+    shortcutUsed = []
+  }
+
+  function resetTransientModes() {
+    quitMode = false
+    popoutMode = false
+    assigning = false
+    assignAppId = ""
+    assigningCommand = ""
+    armedRemoveId = ""
+    armedRemoveTimer.stop()
+    resetShortcutCapture()
+  }
 
   function open(payloadJson) {
     if (!service) return
@@ -258,11 +272,7 @@ Item {
     hideAnim.stop()
     search = ""
     searchFocused = true
-    assigning = false
-    assigningShortcut = false
-    shortcutChecking = false
-    shortcutError = ""
-    shortcutAppId = ""
+    resetTransientModes()
     allAppsOpen = false
     appSizeId = ""
     localNotice = ""
@@ -285,19 +295,13 @@ Item {
   }
 
   function close() {
+    if (!opened) return
     if (view === "bar") {
       barApplyTimer.stop()
       applyBarPlacementNow()
     }
-    if (!opened) return
     allAppsOpen = false
-    if (assigningShortcut) {
-      service.cancelShortcutRequest()
-      assigningShortcut = false
-      shortcutChecking = false
-      shortcutError = ""
-      shortcutAppId = ""
-    }
+    resetTransientModes()
     opened = false
     closing = true
     animateOut()
@@ -574,7 +578,8 @@ Item {
     var text = printable(event)
     if (!text) return
     event.accepted = true
-    var matches = service.paletteMatchesKey(text)
+    var key = text.toLowerCase()
+    var matches = service.paletteMatchesKey(key)
     for (var i = 0; i < matches.length; i++) {
       var app = matches[i]
       if (app.state !== "visible" && app.state !== "hidden") continue
@@ -584,7 +589,7 @@ Item {
       else say(result.message)
       return
     }
-    say("No open application uses " + text + ".")
+    say("No open application uses " + key + ".")
   }
 
   function quitPrompt() {
@@ -607,7 +612,8 @@ Item {
     var text = printable(event)
     if (!text) return
     event.accepted = true
-    var matches = service.paletteMatchesKey(text)
+    var key = text.toLowerCase()
+    var matches = service.paletteMatchesKey(key)
     for (var i = 0; i < matches.length; i++) {
       var app = matches[i]
       if (app.state !== "visible" && app.state !== "hidden" && app.state !== "launching") continue
@@ -617,7 +623,7 @@ Item {
       else say(result.message)
       return
     }
-    say("No running application uses " + text + ".")
+    say("No running application uses " + key + ".")
   }
 
   // Selecting an app hides the palette in the same frame, then starts the
@@ -630,6 +636,7 @@ Item {
     opened = false
     closing = false
     allAppsOpen = false
+    resetTransientModes()
     animY = 0
     animX = 0
     animOpacity = 1
@@ -827,6 +834,7 @@ Item {
     var labels = {
       help: "Help", manage: "Manage", preview: "Preview", settings: "Settings",
       motion: "Motion", bar: "Bar", shortcuts: "Shortcuts",
+      nextWindow: "Next window", popout: "Pop out",
       hide: "Hide", quit: "Quit"
     }
     return labels[name] || String(name || "")
@@ -937,7 +945,6 @@ Item {
       hide: "Hide current dropdown", quit: "Quit an app (press its key next)"
     }
     var out = []
-    var commands = service ? service.commandKeys() : []
     var names = ["help", "manage", "preview", "settings", "motion", "bar", "shortcuts",
       "nextWindow", "popout", "hide", "quit"]
     for (var i = 0; i < names.length; i++) {
@@ -985,27 +992,23 @@ Item {
     else if (view === "help") rows = helpRows()
     else if (view === "keys") rows = keyRows()
     else rows = []
+    // Views without a row list (sizes, anim, bar, appsize) keep their own
+    // selection. Letting a background catalog refresh clamp it to 0 used to
+    // jump the highlighted setting while the user was adjusting it.
     if (rows.length === 0) {
-      sel = 0
-    } else {
-      sel = Math.max(0, Math.min(sel, rows.length - 1))
-      if (!isSelectable(rows[sel])) {
-        for (var i = 0; i < rows.length; i++)
-          if (isSelectable(rows[i])) { sel = i; break }
-      }
+      if (view === "manage" || view === "running" || view === "help" || view === "keys") sel = 0
+      return
+    }
+    sel = Math.max(0, Math.min(sel, rows.length - 1))
+    if (!isSelectable(rows[sel])) {
+      for (var i = 0; i < rows.length; i++)
+        if (isSelectable(rows[i])) { sel = i; break }
     }
   }
 
   onViewChanged: {
     sel = 0
-    armedRemoveId = ""
-    quitMode = false
-    popoutMode = false
-    if (assigningShortcut) service.cancelShortcutRequest()
-    assigningShortcut = false
-    shortcutChecking = false
-    shortcutError = ""
-    shortcutAppId = ""
+    resetTransientModes()
     allAppsOpen = false
     previewReservedFlash = ""
     if (view === "manage") searchFocused = true
@@ -1123,11 +1126,11 @@ Item {
       goBack()
       return
     }
-    if (!assigning && !assigningCommand && !quitMode && !popoutMode
+    if (!assigning && !assigningCommand && !assigningShortcut && !quitMode && !popoutMode
         && event.key === Qt.Key_Tab && (event.modifiers & Qt.ControlModifier)) {
       event.accepted = true
-      // Cycle while Ctrl is held; releasing Ctrl commits the window and
-      // closes the palette without hiding it.
+      // Each Ctrl+Tab press cycles; Enter closes the palette while the
+      // managed window stays visible.
       cycleTab((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
       return
     }
@@ -1198,8 +1201,9 @@ Item {
     if (app) overlay.activateApp(app)
   }
 
-  // Every palette decision is made by Keymap.js, so the keyboard contract is
-  // covered by unit tests instead of living only inside this view.
+  // Palette-view decisions are made by Keymap.js, so the keyboard contract
+  // is covered by unit tests. Manage, Keys, Bar, Sizes, Anim and AppSize have
+  // their own handlers below.
   function handlePaletteKey(event) {
     var text = printable(event)
     var intent = Keymap.paletteIntent({
@@ -1220,7 +1224,7 @@ Item {
     }
     if (intent.action === "commit") {
       event.accepted = true
-      // Commit a tab switch without hiding the window.
+      // Close the palette; the managed window stays visible.
       close()
       return
     }
@@ -1836,7 +1840,7 @@ Item {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               key: "esc"
-              label: overlay.view === "palette" ? "close" : (overlay.view === "bar" ? "close" : "back")
+              label: (overlay.view === "palette" || overlay.view === "bar") ? "close" : "back"
               onTriggered: overlay.goBack()
             }
           }
@@ -2182,18 +2186,6 @@ Item {
             font.pixelSize: Style.font.bodySmall
           }
 
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            visible: false
-            text: ""
-            color: Qt.darker(Commons.Color.popups.text, 1.45)
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
-
           // ---- bar placement ----
           Column {
             visible: overlay.view === "bar"
@@ -2237,7 +2229,7 @@ Item {
               Repeater {
                 model: ["left", "center", "right"]
                 delegate: Rectangle {
-                  id: card
+                  id: barCard
                   required property string modelData
                   property bool hovered: false
                   readonly property int items: Number(overlay.barSizes[modelData] || 0)
@@ -2246,14 +2238,14 @@ Item {
                   height: 46
                   radius: 8
                   color: active ? Qt.rgba(1, 1, 1, 0.12)
-                    : (card.hovered ? Qt.rgba(1, 1, 1, 0.07) : Qt.rgba(1, 1, 1, 0.035))
+                    : (barCard.hovered ? Qt.rgba(1, 1, 1, 0.07) : Qt.rgba(1, 1, 1, 0.035))
                   border.width: 1
                   border.color: active ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.08)
 
                   Text {
                     textFormat: Text.PlainText
                     anchors.centerIn: parent
-                    text: modelData + " · " + card.items + (card.items === 1 ? " item" : " items")
+                    text: modelData + " · " + barCard.items + (barCard.items === 1 ? " item" : " items")
                     horizontalAlignment: Text.AlignHCenter
                     color: active ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.3)
                     font.family: Style.font.family
@@ -2332,17 +2324,6 @@ Item {
               }
             }
 
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              visible: false
-              text: ""
-              color: Qt.darker(Commons.Color.popups.text, 1.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
 
             Text {
               textFormat: Text.PlainText
@@ -2490,17 +2471,6 @@ Item {
               height: contentHeight + 4
             }
 
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              visible: false
-              text: ""
-              color: Qt.darker(Commons.Color.popups.text, 1.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
           }
 
           // ---- sizes ----
@@ -2517,8 +2487,6 @@ Item {
               heightPercent: overlay.geometry.heightPercent
               topOffset: overlay.geometry.topOffset
               reservedTop: overlay.previewReservedTop
-              sideMargin: overlay.geometry.sideMargin
-              edge: overlay.edge
               placement: String(overlay.geometry.placement || "center")
             }
 
@@ -2621,17 +2589,6 @@ Item {
               height: contentHeight + 4
             }
 
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              visible: false
-              text: ""
-              color: Qt.darker(Commons.Color.popups.text, 1.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
 
             SectionTitle { title: "Behaviour" }
 
@@ -2707,17 +2664,6 @@ Item {
               onActivate: { overlay.sel = 3; overlay.adjustAnim(1) }
             }
 
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              visible: false
-              text: ""
-              color: Qt.darker(Commons.Color.popups.text, 1.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
 
             Text {
               textFormat: Text.PlainText
@@ -2746,8 +2692,6 @@ Item {
               heightPercent: overlay.effectiveAppSize().heightPercent
               topOffset: overlay.geometry.topOffset
               reservedTop: overlay.previewReservedTop
-              sideMargin: overlay.geometry.sideMargin
-              edge: overlay.edge
               placement: String(overlay.geometry.placement || "center")
             }
 

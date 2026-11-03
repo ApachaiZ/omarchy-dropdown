@@ -64,6 +64,40 @@ test("webapp class matching rejects a different host", () => {
   assert.equal(Model.webappClassMatches("chrome-notdiscord.com__-Default", "https://discord.com/"), false)
 })
 
+test("launch matching finds the window class before the rule engine can", () => {
+  // Browser PWAs: the brand-independent class fragment and the host title.
+  assert.equal(
+    Model.launchClassMatch({ kind: "webapp", url: "https://discord.com/channels/@me" }),
+    "-discord.com__"
+  )
+  assert.equal(Model.launchTitleMatch({ kind: "webapp", url: "https://discord.com/channels/@me" }), "discord.com")
+  assert.equal(
+    Model.launchClassMatch({ kind: "webapp", expectedClass: "brave-discord.com__channels_@me-Default" }),
+    "brave-discord.com__channels_@me-Default"
+  )
+
+  // Native apps and Electron: the startup class, then the desktop id.
+  assert.equal(Model.launchClassMatch({ kind: "app", startupClass: "md.obsidian.Obsidian" }), "md.obsidian.Obsidian")
+  assert.equal(Model.launchClassMatch({ kind: "system", expectedClass: "apach.dropdown.terminal" }), "apach.dropdown.terminal")
+  assert.equal(Model.launchClassMatch({ kind: "app", id: "spotify" }), "spotify")
+  assert.equal(Model.launchClassMatch({ kind: "app", id: "x" }), "")
+
+  // A configured URL identifies a custom browser-PWA launcher too.
+  assert.equal(
+    Model.launchClassMatch({ kind: "app", name: "MailFlow", url: "https://dakkaserv.taild64b74.ts.net/" }),
+    "-dakkaserv.taild64b74.ts.net__"
+  )
+  assert.equal(
+    Model.launchTitleMatch({ kind: "app", name: "MailFlow", url: "https://dakkaserv.taild64b74.ts.net/" }),
+    "dakkaserv.taild64b74.ts.net"
+  )
+
+  // Apps without a URL get no title fallback: native titles are arbitrary.
+  assert.equal(Model.launchTitleMatch({ kind: "app", startupClass: "md.obsidian.Obsidian" }), "")
+  assert.equal(Model.launchClassMatch(null), "")
+  assert.equal(Model.launchTitleMatch(null), "")
+})
+
 test("special workspaces are stable, unique and shell-safe", () => {
   const a = Model.specialWorkspace("Discord")
   const b = Model.specialWorkspace("discord")
@@ -264,6 +298,21 @@ test("windowMatches separates webapps, terminals and file managers", () => {
   const files = { kind: "system", system: "files", name: "Files", desktopId: "org.gnome.Nautilus" }
   assert.equal(Model.windowMatches(files, { class: "org.gnome.Nautilus" }), true)
   assert.equal(Model.windowMatches(files, { class: "org.gnome.Nautilus", title: "Home" }), true)
+
+  // A configuration URL identifies a browser PWA even when the desktop entry
+  // is an ordinary app with a custom launcher (MailFlow).
+  const mailflow = { kind: "app", name: "MailFlow", url: "https://dakkaserv.taild64b74.ts.net/" }
+  assert.equal(Model.windowMatches(mailflow, { class: "brave-dakkaserv.taild64b74.ts.net__-Default" }), true)
+  assert.equal(Model.windowMatches(mailflow, { class: "brave-other.example__-Default" }), false)
+
+  // Existing-window adoption is strict: a page-controlled title is not proof.
+  assert.equal(Model.windowMatches(discord, { class: "firefox", title: "Discord" }), true)
+  assert.equal(Model.windowMatchesClass(discord, { class: "firefox", title: "Discord" }), false)
+  assert.equal(Model.windowMatchesClass(discord, {
+    class: "chrome-discord.com__channels_@me-Default"
+  }), true)
+  assert.equal(Model.windowMatchesClass(terminal, { class: "apach.dropdown.terminal" }), true)
+  assert.equal(Model.windowMatchesClass(files, { class: "firefox", title: "Files" }), false)
 })
 
 
@@ -283,11 +332,10 @@ test("applyPreset keeps the offsets and updates the percentages", () => {
   assert.equal(Model.applyPreset({}, "nope").preset, undefined)
 })
 
-test("setPath and getPath round-trip nested settings", () => {
+test("setPath writes nested settings", () => {
   const config = Model.clone(Model.DEFAULT_CONFIG)
   Model.setPath(config, "settings.geometry.widthPercent", 72)
-  assert.equal(Model.getPath(config, "settings.geometry.widthPercent"), 72)
-  assert.equal(Model.getPath(config, "settings.nope", "x"), "x")
+  assert.equal(config.settings.geometry.widthPercent, 72)
 })
 
 test("parseBarPlacement finds the widget and every section size", () => {
@@ -433,6 +481,53 @@ test("missingBinds finds generated shortcuts absent from the live table", () => 
   assert.deepEqual(Model.missingBinds(binds, entries), ["SUPER + SHIFT + D"])
   assert.deepEqual(Model.missingBinds([], entries).length, 3)
   assert.deepEqual(Model.missingBinds(binds, []), [])
+})
+
+test("checked parsers keep the previous state on a failed query", () => {
+  assert.equal(Model.parseClientsChecked(""), null)
+  assert.equal(Model.parseClientsChecked("   "), null)
+  assert.equal(Model.parseClientsChecked("not json"), null)
+  assert.equal(Model.parseClientsChecked("{}"), null)
+  assert.deepEqual(Model.parseClientsChecked("[]"), [])
+  assert.equal(Model.parseClientsChecked("[{\"address\":\"0x1\"}]").length, 1)
+
+  assert.equal(Model.parseMonitorsChecked(""), null)
+  assert.equal(Model.parseMonitorsChecked("{\"x\":1}"), null)
+  assert.deepEqual(Model.parseMonitorsChecked("[]"), [])
+})
+
+test("key characters are normalized to the form the keymap matches", () => {
+  assert.equal(Model.normalizeKeyChar("T"), "t")
+  assert.equal(Model.normalizeKeyChar("?"), "?")
+  assert.equal(Model.normalizeKeyChar("7"), "7")
+  assert.equal(Model.normalizeKeyChar(" "), "")
+  assert.equal(Model.normalizeKeyChar("\t"), "")
+  assert.equal(Model.normalizeKeyChar("\u001b"), "")
+  assert.equal(Model.normalizeKeyChar("ab"), "")
+  assert.equal(Model.normalizeKeyChar(""), "")
+
+  assert.equal(Model.validateKey("T", "a", [], {}, {}).ok, true)
+  assert.equal(Model.validateKey(" ", "a", [], {}, {}).ok, false)
+  const config = Model.validateConfig(JSON.stringify({
+    settings: { commands: { help: "H" } },
+    apps: { "a": { enabled: true, key: "T" } }
+  })).config
+  assert.equal(config.apps["a"].key, "t")
+  assert.equal(config.settings.commands.help, "h")
+})
+
+test("a __proto__ app entry cannot pollute the config prototype", () => {
+  const result = Model.validateConfig(JSON.stringify({
+    apps: {
+      "__proto__": { enabled: true, key: "p", shortcut: "SUPER + SHIFT + P" },
+      "constructor": { enabled: true },
+      "prototype": { enabled: true }
+    }
+  }))
+  assert.equal({}.enabled, undefined)
+  assert.equal({}.key, undefined)
+  assert.equal(Object.prototype.hasOwnProperty.call(result.config.apps, "__proto__"), false)
+  assert.equal(result.config.apps.constructor.enabled, undefined)
 })
 
 test("parseCursorPoint accepts JSON and plain hyprctl output", () => {

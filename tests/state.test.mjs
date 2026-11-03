@@ -12,6 +12,7 @@ test("appState follows the managed-window lifecycle", () => {
   assert.equal(State.appState(entry, true, "", false), "visible")
   assert.equal(State.appState({ hidden: true }, true, "", false), "hidden")
   assert.equal(State.appState(entry, false, "", true), "launching")
+  assert.equal(State.appState(entry, true, "", false, 1234), "closing")
   assert.equal(State.appState(entry, true, "boom", false), "error")
 })
 

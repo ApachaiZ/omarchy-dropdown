@@ -35,23 +35,37 @@ window belongs in QML, not in these files.
 
 ```
 desktop entry scan ──► catalog ──► palette cards / Manage rows / drawer
-Hyprland clients ────► registry ─► one visible dropdown per workspace context
+Hyprland clients ────► registry ─► one visible dropdown, globally
 config file ─────────► config ───► generated binds + geometry + commands
 state file ──────────► recovery ─► re-adopt parked windows after a shell restart
 ```
 
-- **Parked windows.** A hidden dropdown is moved to a per-app Hyprland special
-  workspace (`dropdown-<app>-<hash>`), not closed. The state file records its
-  address so a shell restart can recover it.
+- **Parked windows.** A hidden dropdown is moved to its own Hyprland special
+  workspace (`special:dropdown-<app>-<hash>`), not closed. Every app has a
+  separate workspace, so Alt-Tab never shows a pile of hidden windows. The
+  state file records its address so a shell restart can recover it; a
+  migration moves windows parked by older builds off the shared unnamed
+  special.
+- **Launch preemption.** Before starting an app the service arms
+  `_dropdownPending` with `hyprctl eval`. `hypr/dropdown.lua` registers a
+  compositor `window.open` handler that floats the new window, moves it to
+  its parking workspace, sets opacity 0 and tags it `dropdown-hidden` in the
+  same compositor pass that maps it. Chromium and Electron create their
+  toplevel before the window-rule engine can see the class, and `exec` rules
+  only follow the spawned PID (they miss windows created by an already
+  running browser), so this handler is the only mechanism that catches every
+  window before it is painted. The entry expires after 30 s and is cleared
+  as soon as the window is adopted; an `openwindow` hyprctl fallback handles
+  a missing hook.
 - **One visible dropdown.** `revealApp` reuses the current window when another
   app is requested, moving it to the requested monitor/workspace instead of
   creating a second dropdown.
 - **Reveal order.** Fullscreen is cleared first, then the window is floated,
   resized and moved to the target workspace at its final geometry, invisible.
-  The overlay shows an empty card with the same geometry that slides in from
-  the configured edge (compositor-animated). Once it arrives, the window
-  fades in beneath it and the card fades out. The app window is never moved,
-  and no external process is spawned.
+  The service renders an empty card with the same geometry that slides in
+  from the configured edge (compositor-animated). Once it arrives, the window
+  fades in beneath it and the card fades out. The app window is moved and
+  resized in one batch while transparent; no external process animates it.
 - **Context capture.** `capturePaletteContext` reads the live Hyprland monitor
   and workspace at open time; it does not use a cached monitor list, so a fixed
   screen follows that screen's current workspace.
@@ -109,8 +123,9 @@ windows are restored as ordinary windows.
   destroying the layer surface, so the fade-out finishes instead of being cut
   mid-animation. A self-close also calls the shell's `hide()` to clear its open
   flag, so no stale state can replay the palette later.
-- The palette is a `PanelWindow` anchored on the target monitor. Geometry comes
-  from `Model.geometryFor` and is re-applied when monitors change.
+- The palette is a `PanelWindow` anchored on the target monitor with a fixed
+  card width; the managed window's geometry comes from `Model.geometryFor`
+  and is re-applied when monitors change.
 - Tabs, the shortcut band, Manage, Preview, Settings, Animations and Help are
   all views inside the same card; the all-apps drawer is
   `components/AllAppsDrawer.qml`.

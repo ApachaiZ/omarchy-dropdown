@@ -1,6 +1,6 @@
 # Omarchy Dropdown
 
-[![Latest release](https://img.shields.io/badge/release-v0.7.13-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
+[![Latest release](https://img.shields.io/badge/release-v0.7.14-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
 [![Quay integration](https://img.shields.io/badge/Quay-1.1.1%2B-4c8bf5)](https://github.com/ApachaiZ/omarchy-quay)
 ![Omarchy Dropdown — Your apps. One shortcut.](preview.png)
 
@@ -28,7 +28,13 @@ application keeps running in the background.
 - Real native windows — no web views; hidden apps keep their sessions
 - Five most-used cards, an all-apps drawer, tabs and a preview overview
 - Direct Hyprland shortcuts per app, checked against the live bind table
-- Compositor-animated reveal card; the app window itself is never moved
+- Compositor-animated reveal card; the app window is placed at its final
+  geometry in one hidden batch, then faded in
+- Compositor-side launch preemption: a new window is parked and made
+  transparent in the pass that maps it, so it is never painted tiled first —
+  even when an already-running browser or Electron process creates it
+- One parking workspace per app, so Alt-Tab never reveals a pile of hidden
+  windows
 - Atomic config writes with timestamped backups, bind verification and
   orphan-window adoption
 - **Quay-aware**: parked windows are tagged `dropdown-hidden`, so
@@ -91,10 +97,13 @@ The installer copies the plugin to
 right of the bar and reloads Hyprland.
 
 Re-running the installer is safe: it keeps an existing `dropdown.json`, adds
-the Hyprland `require`, generated-shortcut loader and Escape submap only when
-missing, and `omarchy bar put` leaves an existing widget in place. Generated
-direct binds are compared before writing, so an unchanged configuration does
-not reload Hyprland or duplicate a bind.
+the Hyprland `require`, generated-shortcut loader, Escape submap and launch
+preemption hook only when missing, and `omarchy bar put` leaves an existing
+widget in place. Generated direct binds are compared before writing, so an
+unchanged configuration does not reload Hyprland or duplicate a bind. Plugin
+backups are written to `~/.config/omarchy/plugin-backups/`, outside the
+directory Quickshell scans for plugins; a backup left inside `plugins/` would
+be loaded as a second copy of the same plugin id.
 
 Marketplace install:
 
@@ -412,6 +421,12 @@ work.
 - Recall a visible app to hide it; recall a hidden app to bring back the same
   window and session. Hidden applications keep running; Dropdown never suspends
   them.
+- A launch is armed in the compositor before the command runs. The
+  `window.open` hook in `~/.config/hypr/dropdown.lua` parks the new window
+  (floating, transparent, on its own workspace) in the same pass that maps it,
+  so it is never painted tiled. The entry expires after 30 s and is cleared
+  when the window is adopted; an open-window fallback covers an older
+  integration file.
 - A visible dropdown is raised above other floating windows. A left click
   outside hides it immediately and keeps focus on the clicked window; a click
   inside it is passed through untouched. Moving the pointer or Alt-Tab starts
@@ -474,8 +489,9 @@ Animations:
   `slideH+fade`; the same mode plays forward on open and backward on close.
   Duration, easing and reduced motion remain configurable.
 - **Managed window**: a compositor-animated shell card slides in from the
-  configured edge while the real window fades in at its final position; the
-  app window itself is never moved. Reduced motion shows it immediately.
+  configured edge while the real window, already placed at its final
+  geometry in one transparent batch, fades in beneath it. Reduced motion
+  shows it immediately.
 - The **hide delay** lives with the window behaviour: `s` → **Behaviour** →
   **Hide after focus loss** (5 s by default, 0–30 s), used whenever focus
   leaves the dropdown without a click (pointer move, Alt-Tab, workspace
@@ -550,11 +566,16 @@ the live client list; a stale address is never applied.
 
 ## Safety and performance
 
-- Launches go through Hyprland's exec rules: the window maps directly on its
-  parked special workspace, floating and transparent, so it never flashes at a
-  default position. The parsed desktop-entry argv is shell-quoted before being
+- Launch preemption runs inside the compositor: the service arms a pending
+  entry, and the `window.open` hook in `hypr/dropdown.lua` floats the window,
+  moves it to its parking workspace and makes it transparent in the same
+  compositor pass that maps it. It therefore never flashes at a default
+  position, even when an already-running browser or Electron process creates
+  the window. The parsed desktop-entry argv is shell-quoted before being
   handed to Hyprland; the entry `Exec` is never `eval`-ed.
-- Window operations use validated hex addresses and quoted workspace names.
+- Window operations use validated hex addresses and Lua-quoted workspace
+  names. Commands are sent as argv vectors; Hyprland batch dispatches escape
+  the batch separators as well as the Lua string.
 - A new instance is identified from a pre-launch window snapshot, so an
   ordinary window is not moved or resized by accident.
 - No cookies, tokens, URLs or application content are logged.

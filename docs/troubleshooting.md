@@ -10,6 +10,21 @@ It prints the plugin version, config/binds/state paths, live counts, app states,
 the last Hyprland dispatch error and the generated shortcut state. `status` is
 the shorter, stable view used by scripts.
 
+## A reinstall seems to have no effect
+
+A plugin backup left inside `~/.config/omarchy/plugins/` is still scanned by
+Quickshell and carries the same manifest id, so the shell can load the old
+copy. Installs since 0.7.14 keep backups in
+`~/.config/omarchy/plugin-backups/` instead. Remove or move any
+`apach.dropdown.bak.*` / `apach.dropdown.removed.*` directory from the plugin
+root, then restart the shell:
+
+```bash
+mkdir -p ~/.config/omarchy/plugin-backups
+mv ~/.config/omarchy/plugins/apach.dropdown.bak.* ~/.config/omarchy/plugin-backups/ 2>/dev/null || true
+omarchy restart shell
+```
+
 ## The palette does not open
 
 - Check the bar widget is enabled: `omarchy plugin list | grep dropdown`.
@@ -18,6 +33,31 @@ the shorter, stable view used by scripts.
 - Reload the shell once: `omarchy restart shell`. A hot reload can leave an old
   component cached; a full restart clears it.
 - Inspect `doctor`: `configLoaded` and `bindsLoaded` should both be `true`.
+
+## A new window is briefly tiled or full-screen
+
+The window should be parked in the compositor before it is painted. Confirm
+the preemption hook is present:
+
+```bash
+grep -n _dropdownPending ~/.config/hypr/dropdown.lua
+hyprctl reload
+```
+
+The installer adds the hook to an existing `dropdown.lua` when it is missing.
+Without it, the `openwindow` fallback still parks the window, but through
+`hyprctl` (one or two frames later). A stale `_dropdownPending` entry never
+survives Hyprland: it expires after 30 s and is cleared on adoption.
+
+## Escape does not hide the window
+
+- Confirm `hyprctl submap` prints `apach-dropdown` while a managed window is
+  visible. If it prints `default`, focus the window once: Dropdown re-adopts
+  a focused managed window and re-arms the submap.
+- The Escape bind itself lives in `~/.config/hypr/dropdown.lua`; run
+  `hyprctl reload` after editing it.
+- A window that is fully off-screen can still be hidden with its app key:
+  Dropdown re-applies the configured geometry before showing it.
 
 ## A managed app does not appear
 

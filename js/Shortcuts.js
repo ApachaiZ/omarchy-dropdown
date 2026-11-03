@@ -5,8 +5,20 @@
 // normalized by Model.normalizeShortcut().
 
 function luaString(value) {
+  // Semicolons and brackets are escaped as three-digit decimal sequences.
+  // They are ordinary characters to Lua, but `hyprctl --batch` splits its
+  // argument on `;` outside `[]`, and it does not parse Lua strings. Without
+  // these escapes a workspace name could break out of the batch framing.
   return '"' + String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t") + '"'
+    .replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t")
+    .replace(/;/g, "\\059").replace(/\[/g, "\\091").replace(/\]/g, "\\093") + '"'
+}
+
+// Quote one argv value for the /bin/sh command that Hyprland's exec/`o.bind`
+// helper runs. Application ids come from desktop files and may contain
+// spaces, quotes or semicolons.
+function shellQuote(value) {
+  return "'" + String(value || "").replace(/'/g, "'\\''") + "'"
 }
 
 function header() {
@@ -61,7 +73,7 @@ function bindsFile(entries, prefix) {
     var entry = entries[i]
     lines.push("o.bind(" + luaString(entry.shortcut) + ", " +
       luaString("Dropdown: " + entry.name) + ", " +
-      luaString(target + " showApp " + entry.id) +
+      luaString(target + " showApp " + shellQuote(entry.id)) +
       ", { submap_universal = true })")
   }
   return lines.join("\n") + "\n"
@@ -90,6 +102,7 @@ function sortEntries(entries) {
 if (typeof module !== "undefined") {
   module.exports = {
     luaString: luaString,
+    shellQuote: shellQuote,
     header: header,
     validateShortcut: validateShortcut,
     bindConflict: bindConflict,

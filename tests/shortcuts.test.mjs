@@ -43,10 +43,32 @@ test("bindsFile escapes text and sorts deterministically", () => {
   ])
   assert.deepEqual(entries.map((e) => e.id), ["a", "b"])
   const text = Shortcuts.bindsFile(entries, "omarchy-shell apach.dropdown")
-  assert.match(text, /omarchy-shell apach\.dropdown showApp a/)
+  assert.match(text, /omarchy-shell apach\.dropdown showApp 'a'/)
   assert.match(text, /Quote \\"app\\"/)
   assert.match(text, /submap_universal = true/)
   assert.equal(Shortcuts.bindsFile([], "x").trim().split("\n").length, 2)
+})
+
+test("luaString cannot break out of a hyprctl batch frame", () => {
+  const escaped = Shortcuts.luaString("x;dispatch hl.dsp.exec_cmd('touch /tmp/x');y[z]")
+  assert.equal(escaped.includes(";"), false)
+  assert.equal(escaped.includes("["), false)
+  assert.equal(escaped.includes("]"), false)
+  assert.match(escaped, /\\059/)
+  assert.match(escaped, /\\091/)
+  assert.match(escaped, /\\093/)
+})
+
+test("shellQuote protects desktop app ids in generated binds", () => {
+  assert.equal(Shortcuts.shellQuote("Google Contacts"), "'Google Contacts'")
+  assert.equal(Shortcuts.shellQuote("x;touch /tmp/pwn"), "'x;touch /tmp/pwn'")
+  assert.equal(Shortcuts.shellQuote("it's"), "'it'\\''s'")
+  const text = Shortcuts.bindsFile([
+    { id: "x;touch /tmp/pwn", name: "Evil", shortcut: "SUPER + SHIFT + E" }
+  ], "omarchy-shell apach.dropdown")
+  // The Lua source carries the batch-safe escape; Lua decodes it back to ';'
+  // inside the shell single quotes, where it is literal.
+  assert.match(text, /showApp 'x\\059touch \/tmp\/pwn'/)
 })
 
 test("header is a valid Lua comment-only file", () => {
