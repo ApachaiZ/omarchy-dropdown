@@ -302,8 +302,11 @@ Item {
     }
     allAppsOpen = false
     resetTransientModes()
-    opened = false
+    // closing must be set before opened: `visible: opened || closing` would
+    // otherwise evaluate to false for one property change, unmapping the
+    // layer surface and remapping it mid-fade (the close flicker).
     closing = true
+    opened = false
     animateOut()
     if (service) service.paletteClosed()
     notifyShellClosed()
@@ -1121,6 +1124,13 @@ Item {
   }
 
   function handleKey(event) {
+    // The layer keeps keyboard focus during the close fade so the window
+    // behind does not change while the card is still visible. Ignore keys in
+    // that short window instead of acting on a palette that is already closed.
+    if (!opened) {
+      event.accepted = true
+      return
+    }
     if (event.key === Qt.Key_Escape) {
       event.accepted = true
       goBack()
@@ -1752,7 +1762,12 @@ Item {
     exclusionMode: ExclusionMode.Ignore
     WlrLayershell.namespace: "apach-dropdown"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: overlay.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    // Keep the layer focused until the close animation has finished. Releasing
+    // focus at opened=false made the previous window regain focus (border and
+    // stacking change) while the semi-transparent palette was still fading,
+    // which looked like the palette flickered.
+    WlrLayershell.keyboardFocus: (overlay.opened || overlay.closing)
+      ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     anchors { top: true; bottom: true; left: true; right: true }
     // Make the full transparent layer accept pointer input. Without an
     // explicit mask the empty desktop area can stay click-through, so an

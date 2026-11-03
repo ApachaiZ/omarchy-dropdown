@@ -4,6 +4,20 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.7.15 — 2026-11-03
+
+### Fixed
+
+- Escape now closes the palette in one clean fade. `close()` set
+  `opened = false` before `closing = true`, so the
+  `visible: opened || closing` binding evaluated to false for one property
+  change, unmapping the layer surface and remapping it in the middle of the
+  fade (the visible flicker). The layer stays mapped until the animation
+  ends.
+- The palette keeps exclusive keyboard focus for the close fade, so the
+  window behind does not regain focus and raise while the semi-transparent
+  card is still visible. Keys pressed during that short window are ignored.
+
 ## 0.7.14 — 2026-11-03
 
 ### Fixed
