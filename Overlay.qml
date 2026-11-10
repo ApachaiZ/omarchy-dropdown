@@ -18,6 +18,54 @@ import "components"
 Item {
   id: overlay
 
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
+
+  function tr(key, args, fallback) {
+    var value = strings.t(key, fallback)
+    for (var i = 0; i < (args || []).length; i++) value = value.arg(String(args[i]))
+    return value
+  }
+
+  function number(value) {
+    return Commons.I18n.formatNumber(value)
+  }
+
+  function enumLabel(prefix, value) {
+    return strings.t(prefix + "." + String(value), String(value || ""))
+  }
+
+  function appConflictText(app) {
+    if (!app || !app.conflict) return ""
+    return tr(app.conflictKey, app.conflictArgs, app.conflict)
+  }
+
+  function appSecondaryText(app) {
+    if (!app) return ""
+    if (app.noteKey) return tr(app.noteKey, app.noteArgs, app.note)
+    if (app.detailKey) return strings.t(app.detailKey, app.detail)
+    return String(app.note || app.detail || "")
+  }
+
+  // Translate a row model built by manageRows/helpRows/keyRows. Called from
+  // text bindings so a language switch re-renders without rebuilding rows.
+  function rowLabel(row) {
+    if (!row) return ""
+    if (row.headerKey) {
+      return strings.tn(row.headerKey, row.count).arg(Commons.I18n.formatNumber(row.count))
+    }
+    if (row.helpKind === "app") {
+      var conflict = row.conflictKey ? tr(row.conflictKey, row.conflictArgs, row.conflict) : String(row.conflict || "")
+      return conflict ? strings.t("help.appConflictRow").arg(row.appName).arg(conflict) : String(row.appName || "")
+    }
+    if (row.helpKind === "system") {
+      var detail = row.detailKey ? strings.t(row.detailKey, row.detail) : String(row.detail || "")
+      var status = row.enabled ? strings.t("help.enabled") : strings.t("help.disabled")
+      return strings.t("help.systemRow").arg(row.appName).arg(status).arg(detail)
+    }
+    if (row.labelKey) return tr(row.labelKey, row.labelArgs)
+    return String(row.label || "")
+  }
+
   property var service: null
   property bool opened: false
   property bool closing: false
@@ -107,10 +155,9 @@ Item {
   readonly property real animScaleFrom: animHas("zoom") ? 0.94 : (animHas("scale") ? 0.92 : 1)
   readonly property int animShowEasing: animHas("bounce") ? Easing.OutBack : animEasing
   function animationLabel(mode) {
-    var names = { slide: "Slide", slideH: "Horizontal", fade: "Fade",
-      scale: "Scale", zoom: "Zoom", bounce: "Bounce", none: "None" }
     var parts = String(mode || "none").split("+")
-    for (var i = 0; i < parts.length; i++) parts[i] = names[parts[i]] || parts[i]
+    for (var i = 0; i < parts.length; i++)
+      parts[i] = strings.t("animation." + parts[i], parts[i])
     return parts.join(" + ")
   }
   readonly property string edge: {
@@ -144,18 +191,18 @@ Item {
   readonly property int cardWidth: 780
 
   readonly property string viewTitle: {
-    if (view === "help") return "Help"
-    if (view === "manage") return "Manage applications"
-    if (view === "running") return "Preview"
-    if (view === "sizes") return "Size & position"
-    if (view === "anim") return "Animations"
-    if (view === "keys") return "Shortcuts"
-    if (view === "bar") return "Bar placement"
+    if (view === "help") return strings.t("view.help")
+    if (view === "manage") return strings.t("view.manage")
+    if (view === "running") return strings.t("view.running")
+    if (view === "sizes") return strings.t("view.sizes")
+    if (view === "anim") return strings.t("view.anim")
+    if (view === "keys") return strings.t("view.keys")
+    if (view === "bar") return strings.t("view.bar")
     if (view === "appsize") {
       var app = service ? service.findApp(appSizeId) : null
-      return app ? "Size — " + app.name : "Size"
+      return app ? strings.t("view.appsizeFor").arg(app.name) : strings.t("view.appsize")
     }
-    return "Dropdown"
+    return strings.t("tooltip.idle")
   }
 
   // ---- Animation -----------------------------------------------------------
@@ -339,66 +386,67 @@ Item {
 
   function bandItems() {
     var items = []
-    if (quitMode) return [{ key: "Esc", label: "Cancel quit" }]
-    if (popoutMode) return [{ key: "Esc", label: "Cancel pop out" }]
+    if (quitMode) return [{ key: "Esc", label: strings.t("band.cancelQuit") }]
+    if (popoutMode) return [{ key: "Esc", label: strings.t("band.cancelPopout") }]
     if (view === "palette") {
       items = [
-        { key: commandKey("help"), label: "Help" },
-        { key: commandKey("manage"), label: "Manage" },
-        { key: commandKey("preview"), label: "Preview" },
-        { key: commandKey("settings"), label: "Settings" },
-        { key: commandKey("bar"), label: "Bar" },
-        { key: commandKey("shortcuts"), label: "Keys" },
-        { key: commandKey("hide"), label: "Hide" },
-        { key: commandKey("popout"), label: "Pop out" },
-        { key: commandKey("quit"), label: "Quit" },
-        { key: "Esc", label: "Reduce" }
+        { key: commandKey("help"), label: strings.t("band.help") },
+        { key: commandKey("manage"), label: strings.t("band.manage") },
+        { key: commandKey("preview"), label: strings.t("band.preview") },
+        { key: commandKey("settings"), label: strings.t("band.settings") },
+        { key: commandKey("bar"), label: strings.t("band.bar") },
+        { key: commandKey("shortcuts"), label: strings.t("band.keys") },
+        { key: commandKey("hide"), label: strings.t("band.hide") },
+        { key: commandKey("popout"), label: strings.t("band.popout") },
+        { key: commandKey("quit"), label: strings.t("band.quit") },
+        { key: "Esc", label: strings.t("band.reduce") }
       ]
     } else if (view === "manage") {
       items = [
-        { key: "Enter", label: "Toggle" }, { key: "k", label: "Key" },
-        { key: "s", label: "Size" }, { key: "A", label: "Startup" },
-        { key: "D", label: "Direct" }, { key: "o", label: "Adopt" }, { key: "u", label: "Release" },
-        { key: "r", label: "Refresh" }, { key: "Esc", label: "Back" }
+        { key: "Enter", label: strings.t("band.toggle") }, { key: "k", label: strings.t("band.key") },
+        { key: "s", label: strings.t("band.size") }, { key: "A", label: strings.t("band.startup") },
+        { key: "D", label: strings.t("band.direct") }, { key: "o", label: strings.t("band.adopt") },
+        { key: "u", label: strings.t("band.release") },
+        { key: "r", label: strings.t("band.refresh") }, { key: "Esc", label: strings.t("band.back") }
       ]
     } else if (view === "sizes" || view === "anim") {
       items = [
-        { key: "↑↓", label: "Row" }, { key: "←→", label: "Adjust" },
-        { key: "Enter", label: "Next" }, { key: "r", label: "Reset" },
-        { key: "Esc", label: "Back" }
+        { key: "↑↓", label: strings.t("band.row") }, { key: "←→", label: strings.t("band.adjust") },
+        { key: "Enter", label: strings.t("band.next") }, { key: "r", label: strings.t("band.reset") },
+        { key: "Esc", label: strings.t("band.back") }
       ]
     } else if (view === "bar") {
       items = [
-        { key: "↑↓", label: "Row" }, { key: "←→", label: "Change" },
-        { key: "Enter", label: "Next" }, { key: "r", label: "Reload" },
-        { key: "Esc", label: "Close" }
+        { key: "↑↓", label: strings.t("band.row") }, { key: "←→", label: strings.t("band.change") },
+        { key: "Enter", label: strings.t("band.next") }, { key: "r", label: strings.t("band.reload") },
+        { key: "Esc", label: strings.t("band.close") }
       ]
     } else if (view === "keys") {
       items = [
-        { key: "↑↓", label: "Row" }, { key: "Enter", label: "Rebind" },
-        { key: "r", label: "Reset" }, { key: "Esc", label: "Back" }
+        { key: "↑↓", label: strings.t("band.row") }, { key: "Enter", label: strings.t("band.rebind") },
+        { key: "r", label: strings.t("band.reset") }, { key: "Esc", label: strings.t("band.back") }
       ]
     } else if (view === "appsize") {
       items = [
-        { key: "↑↓", label: "Row" }, { key: "←→", label: "Adjust" },
-        { key: "i/r", label: "Inherit" }, { key: "Esc", label: "Back" }
+        { key: "↑↓", label: strings.t("band.row") }, { key: "←→", label: strings.t("band.adjust") },
+        { key: "i/r", label: strings.t("band.inherit") }, { key: "Esc", label: strings.t("band.back") }
       ]
     } else if (view === "running") {
       items = [
-        { key: "↑↓", label: "Select" },
-        { key: "Enter", label: "Open" },
-        { key: "app key", label: "Open" },
-        { key: commandKey("hide"), label: "Hide" },
-        { key: commandKey("quit"), label: "Quit" },
-        { key: "Esc", label: "Back" }
+        { key: "↑↓", label: strings.t("band.select") },
+        { key: "Enter", label: strings.t("band.open") },
+        { key: "app key", label: strings.t("band.open") },
+        { key: commandKey("hide"), label: strings.t("band.hide") },
+        { key: commandKey("quit"), label: strings.t("band.quit") },
+        { key: "Esc", label: strings.t("band.back") }
       ]
     } else if (view === "help") {
-      items = [ { key: "Esc", label: "Back" } ]
+      items = [ { key: "Esc", label: strings.t("band.back") } ]
     } else {
       items = [
-        { key: "Enter", label: "Show/Hide" }, { key: "s", label: "Size" },
-        { key: "h", label: "Hide" }, { key: "q", label: "Quit" },
-        { key: "Esc", label: "Back" }
+        { key: "Enter", label: strings.t("band.showHide") }, { key: "s", label: strings.t("band.size") },
+        { key: "h", label: strings.t("band.hide") }, { key: "q", label: strings.t("band.quit") },
+        { key: "Esc", label: strings.t("band.back") }
       ]
     }
     return items
@@ -486,7 +534,7 @@ Item {
       if (code !== 0) {
         overlay.pendingBarTouched = false
         var reason = String(barMoveError.text || "").trim().split("\n")[0]
-        overlay.say("Bar placement failed" + (reason ? ": " + reason : "."), true)
+        overlay.say(reason ? overlay.tr("notice.barFailed", [reason]) : overlay.tr("notice.barFailedNoReason"), true)
         return
       }
       if (overlay.barMoveDirty) {
@@ -495,7 +543,7 @@ Item {
         return
       }
       overlay.pendingBarTouched = false
-      overlay.say("Bar placement applied.")
+      overlay.say(overlay.tr("notice.barApplied"))
     }
   }
 
@@ -530,7 +578,7 @@ Item {
     if (app.state !== "visible" && app.state !== "hidden") return
     service.revealApp(appId, service.captureContext())
     service.paletteTarget = appId
-    say(app.name + " shown.")
+    say(strings.t("notice.appShown").arg(app.name))
   }
 
   function activateTab(appId) {
@@ -541,8 +589,8 @@ Item {
 
   function cycleTab(delta, closeAfter) {
     var list = openTabs
-    if (list.length === 0) { say("No open window."); return }
-    if (list.length === 1) { say("Only one window is open."); return }
+    if (list.length === 0) { say(strings.t("notice.noOpenWindow")); return }
+    if (list.length === 1) { say(strings.t("notice.onlyOneWindow")); return }
     var index = activeTabIndex
     if (index < 0) index = delta > 0 ? -1 : 0
     var next = list[(index + delta + list.length) % list.length]
@@ -562,16 +610,16 @@ Item {
 
   function popoutPrompt() {
     var apps = popoutTargets()
-    if (apps.length === 0) return "No managed application is running."
+    if (apps.length === 0) return strings.t("notice.noManagedRunning")
     var labels = []
     for (var i = 0; i < apps.length; i++) labels.push((apps[i].key || "—") + " " + apps[i].name)
-    return "Pop out which app?  " + labels.join("   ·   ")
+    return strings.t("notice.popoutPrompt").arg(labels.join("   ·   "))
   }
 
   function beginPopoutMode() {
     if (!service) return
     var apps = popoutTargets()
-    if (apps.length === 0) { say("No managed application is running."); return }
+    if (apps.length === 0) { say(strings.t("notice.noManagedRunning")); return }
     quitMode = false
     popoutMode = true
     say(popoutPrompt())
@@ -592,21 +640,21 @@ Item {
       else say(result.message)
       return
     }
-    say("No open application uses " + key + ".")
+    say(strings.t("notice.noOpenAppUses").arg(key))
   }
 
   function quitPrompt() {
     var apps = runningApps()
-    if (apps.length === 0) return "No managed application is running."
+    if (apps.length === 0) return strings.t("notice.noManagedRunning")
     var labels = []
     for (var i = 0; i < apps.length; i++) labels.push((apps[i].key || "—") + " " + apps[i].name)
-    return "Quit which app?  " + labels.join("   ·   ")
+    return strings.t("notice.quitPrompt").arg(labels.join("   ·   "))
   }
 
   function beginQuitMode() {
     if (!service) return
     var apps = runningApps()
-    if (apps.length === 0) { say("No managed application is running."); return }
+    if (apps.length === 0) { say(strings.t("notice.noManagedRunning")); return }
     quitMode = true
     say(quitPrompt())
   }
@@ -626,7 +674,7 @@ Item {
       else say(result.message)
       return
     }
-    say("No running application uses " + key + ".")
+    say(strings.t("notice.noRunningAppUses").arg(key))
   }
 
   // Selecting an app hides the palette in the same frame, then starts the
@@ -650,7 +698,7 @@ Item {
 
   function activateApp(app) {
     if (!app) return
-    if (app.conflict) { say(app.conflict + "."); return }
+    if (app.conflict) { say(appConflictText(app) + "."); return }
     var context = service.captureContext()
     var wasOpen = opened
     if (wasOpen) closeImmediate()
@@ -746,7 +794,8 @@ Item {
   }
 
   function screenLabel(value) {
-    return String(value || "auto")
+    if (!value || String(value) === "auto") return strings.t("settings.auto")
+    return String(value)
   }
 
   function searchScore(app, q) {
@@ -803,19 +852,19 @@ Item {
     var apps = filteredApplications()
     var missing = (service ? service.missingApps : []).filter(function(app) { return matchesSearch(app, q) })
     if (systems.length > 0) {
-      out.push({ kind: "header", label: "System defaults · " + systems.length })
+      out.push({ kind: "header", headerKey: "manage.headers.system", count: systems.length })
       for (var s = 0; s < systems.length; s++) out.push(systems[s])
     }
     if (web.length > 0) {
-      out.push({ kind: "header", label: "Web apps · " + web.length })
+      out.push({ kind: "header", headerKey: "manage.headers.webapps", count: web.length })
       for (var w = 0; w < web.length; w++) out.push(web[w])
     }
     if (apps.length > 0) {
-      out.push({ kind: "header", label: "Applications · " + apps.length })
+      out.push({ kind: "header", headerKey: "manage.headers.applications", count: apps.length })
       for (var a = 0; a < apps.length; a++) out.push(apps[a])
     }
     if (missing.length > 0) {
-      out.push({ kind: "header", label: "Missing · " + missing.length })
+      out.push({ kind: "header", headerKey: "manage.headers.missing", count: missing.length })
       for (var m = 0; m < missing.length; m++) out.push(missing[m])
     }
     return out
@@ -832,15 +881,9 @@ Item {
     return out
   }
 
-  // Labels used by the preview when a command key collides with an app key.
+  // Short labels used by the preview when a command key collides with an app key.
   function commandLabel(name) {
-    var labels = {
-      help: "Help", manage: "Manage", preview: "Preview", settings: "Settings",
-      motion: "Motion", bar: "Bar", shortcuts: "Shortcuts",
-      nextWindow: "Next window", popout: "Pop out",
-      hide: "Hide", quit: "Quit"
-    }
-    return labels[name] || String(name || "")
+    return strings.t("command." + String(name || ""), String(name || ""))
   }
 
   // Non-empty when this app's key belongs to a palette command or to the
@@ -848,7 +891,7 @@ Item {
   function previewReservedLabel(app) {
     if (!app || !app.key || !service) return ""
     var action = service.commandForKey(String(app.key).toLowerCase())
-    return action === "" ? "" : ("reserved · " + commandLabel(action))
+    return action === "" ? "" : strings.t("notice.reservedLabel").arg(commandLabel(action))
   }
 
   function previewAppForKey(key) {
@@ -886,7 +929,7 @@ Item {
       var hiddenApp = rows[sel]
       if (!hiddenApp) return
       var entry = service.registry[hiddenApp.id]
-      if (entry && entry.hidden) { say(hiddenApp.name + " is already hidden."); return }
+      if (entry && entry.hidden) { say(strings.t("notice.alreadyHidden").arg(hiddenApp.name)); return }
       service.parkApp(hiddenApp.id, true)
       close()
       return
@@ -927,59 +970,66 @@ Item {
       if (app) {
         previewReservedFlash = String(app.id)
         previewFlashTimer.restart()
-        say("Key " + key + " is reserved for " + commandLabel(action) + ". Change it in Manage.", true)
+        say(strings.t("notice.keyReserved").arg(key).arg(commandLabel(action)), true)
         return
       }
       runPreviewCommand(action)
       return
     }
-    if (!app) { say("No managed application uses " + key + "."); return }
+    if (!app) { say(strings.t("notice.noManagedAppUses").arg(key)); return }
     event.accepted = true
     previewOpenApp(app)
   }
 
   function keyRows() {
-    var labels = {
-      help: "Help", manage: "Manage applications", preview: "Preview running apps",
-      settings: "Display, tabs, behaviour", motion: "Animation choices",
-      shortcuts: "This shortcut editor", bar: "Bar placement",
-      nextWindow: "Next open window (Ctrl+Tab also works)",
-      popout: "Pop out a window (press its key next)",
-      hide: "Hide current dropdown", quit: "Quit an app (press its key next)"
-    }
     var out = []
     var names = ["help", "manage", "preview", "settings", "motion", "bar", "shortcuts",
       "nextWindow", "popout", "hide", "quit"]
     for (var i = 0; i < names.length; i++) {
       var name = names[i]
-      out.push({ command: name, key: commandKey(name), label: labels[name], fixed: false })
+      out.push({ command: name, key: commandKey(name), labelKey: "commandHelp." + name, fixed: false })
     }
-    out.push({ command: "reduce", key: "Esc", label: "Hide the focused dropdown (global)", fixed: true })
+    out.push({ command: "reduce", key: "Esc", labelKey: "commandHelp.reduce", fixed: true })
     return out
   }
 
   function helpRows() {
     var out = []
-    out.push({ kind: "header", label: "Commands" })
+    out.push({ kind: "header", labelKey: "help.commands" })
     var keys = keyRows()
     for (var k = 0; k < keys.length; k++)
-      out.push({ kind: "row", key: keys[k].key, label: keys[k].label })
-    out.push({ kind: "header", label: "Application keys" })
+      out.push({ kind: "row", key: keys[k].key, labelKey: keys[k].labelKey })
+    out.push({ kind: "header", labelKey: "help.appKeys" })
     var enabled = service ? service.enabledApps : []
-    if (enabled.length === 0) out.push({ kind: "row", key: "m", label: "No application managed yet — press m" })
+    if (enabled.length === 0) out.push({ kind: "row", key: "m", labelKey: "help.noApp" })
     for (var i = 0; i < enabled.length; i++) {
       var app = enabled[i]
-      out.push({ kind: "row", key: app.key || "—", label: app.name + (app.conflict ? " — " + app.conflict : "") })
+      out.push({
+        kind: "row",
+        key: app.key || "—",
+        helpKind: "app",
+        appName: app.name,
+        conflict: app.conflict,
+        conflictKey: app.conflictKey,
+        conflictArgs: app.conflictArgs
+      })
     }
-    out.push({ kind: "header", label: "Optional system applications" })
+    out.push({ kind: "header", labelKey: "help.systemApps" })
     var systems = systemApps()
     for (var j = 0; j < systems.length; j++) {
       var sys = systems[j]
-      out.push({ kind: "row", key: sys.enabled ? (sys.key || "—") : "off",
-        label: sys.name + " — " + (sys.enabled ? "enabled" : "disabled") + " (" + (sys.detail || "") + ")" })
+      out.push({
+        kind: "row",
+        key: sys.enabled ? (sys.key || "—") : "off",
+        helpKind: "system",
+        appName: sys.name,
+        enabled: sys.enabled,
+        detail: sys.detail,
+        detailKey: sys.detailKey
+      })
     }
-    out.push({ kind: "header", label: "Animation scope" })
-    out.push({ kind: "row", key: "", label: "Animations apply to this palette only. Managed application windows follow Hyprland's own window animations." })
+    out.push({ kind: "header", labelKey: "help.animationScope" })
+    out.push({ kind: "row", key: "", labelKey: "help.animationNote" })
     return out
   }
 
@@ -1048,7 +1098,7 @@ Item {
       overlay.shortcutError = ""
       overlay.shortcutPendingChord = ""
       overlay.shortcutAppId = ""
-      overlay.say("Direct shortcut: " + shortcut)
+      overlay.say(strings.t("notice.directShortcutSet").arg(shortcut))
       overlay.refreshRows()
     }
     function onShortcutRejected(appId, message) {
@@ -1079,12 +1129,12 @@ Item {
     }
     if (quitMode) {
       quitMode = false
-      say("Quit cancelled.")
+      say(strings.t("notice.quitCancelled"))
       return
     }
     if (popoutMode) {
       popoutMode = false
-      say("Pop out cancelled.")
+      say(strings.t("notice.popoutCancelled"))
       return
     }
     if (assigningShortcut) {
@@ -1094,18 +1144,18 @@ Item {
       shortcutError = ""
       shortcutAppId = ""
       shortcutSuggestion = ""
-      say("Direct shortcut change cancelled.")
+      say(strings.t("notice.directShortcutCancelled"))
       return
     }
     if (assigningCommand) {
       assigningCommand = ""
-      say("Shortcut change cancelled.")
+      say(strings.t("notice.commandChangeCancelled"))
       return
     }
     if (assigning) {
       assigning = false
       assignAppId = ""
-      say("Key assignment cancelled.")
+      say(strings.t("notice.keyAssignmentCancelled"))
       return
     }
     if (view === "bar") { close(); return }
@@ -1153,7 +1203,7 @@ Item {
       var result = service.assignKey(assignAppId, key)
       if (result.ok) {
         var app = service.findApp(assignAppId)
-        say("Key " + key + " assigned to " + (app ? app.name : assignAppId) + ".")
+        say(strings.t("notice.keyAssigned").arg(key).arg(app ? app.name : assignAppId))
         assigning = false
         assignAppId = ""
         focusKeys()
@@ -1170,7 +1220,7 @@ Item {
       event.accepted = true
       var assigned = service.setCommandKey(assigningCommand, cmdKey.toLowerCase())
       if (assigned.ok) {
-        say("Shortcut " + cmdKey.toLowerCase() + " assigned.")
+        say(strings.t("notice.commandAssigned").arg(cmdKey.toLowerCase()))
         assigningCommand = ""
         refreshRows()
         focusKeys()
@@ -1285,21 +1335,22 @@ Item {
       event.accepted = true
       var matches = service.paletteMatchesKey(intent.key)
       if (matches.length === 0) {
-        say("Unknown key " + intent.key + ". Press " + overlay.commandKey("help") + " for help.")
+        say(strings.t("notice.unknownKeyHelp").arg(intent.key).arg(overlay.commandKey("help")))
         return
       }
       if (matches.length > 1) {
-        say("Key " + intent.key + " is used by " + matches.map(function(app) { return app.name }).join(" and ") + ". Fix it in Manage.")
+        var names = matches.map(function(app) { return app.name }).join(", ")
+        say(strings.t("notice.keyUsedBy").arg(intent.key).arg(names))
         return
       }
       var app = matches[0]
-      if (app.conflict) { say(app.conflict + "."); return }
+      if (app.conflict) { say(appConflictText(app) + "."); return }
       overlay.activateApp(app)
       return
     }
     if (intent.action === "text") {
       event.accepted = true
-      say("Unknown key " + intent.text + ". Press " + overlay.commandKey("help") + " for help.")
+      say(strings.t("notice.unknownKeyHelp").arg(intent.text).arg(overlay.commandKey("help")))
     }
   }
 
@@ -1337,10 +1388,10 @@ Item {
       event.accepted = true
       var startupApp = rows[sel]
       if (startupApp && startupApp.kind !== "header" && !startupApp.missing) {
-        if (!startupApp.enabled) overlay.say("Enable " + startupApp.name + " before setting startup.")
+        if (!startupApp.enabled) overlay.say(strings.t("notice.enableBeforeStartup").arg(startupApp.name))
         else {
           var startupResult = service.setLaunchAtLogin(startupApp.id, !startupApp.launchAtLogin)
-          if (startupResult.ok) overlay.say(startupApp.name + (startupApp.launchAtLogin ? " will no longer start hidden." : " will start hidden at login."))
+          if (startupResult.ok) overlay.say(strings.t(startupApp.launchAtLogin ? "notice.startupDisabled" : "notice.startupEnabled").arg(startupApp.name))
           else overlay.say(startupResult.message)
           refreshRows()
         }
@@ -1377,21 +1428,21 @@ Item {
     if (key === "o") {
       event.accepted = true
       var adopted = service.adoptApp(rows[sel] && rows[sel].kind !== "header" ? rows[sel].id : "")
-      say(adopted.message || "Window adopted.")
+      say(adopted.message || strings.t("notice.windowAdopted"))
       refreshRows()
       return
     }
     if (key === "u") {
       event.accepted = true
       var released = service.releaseApp(rows[sel] && rows[sel].kind !== "header" ? rows[sel].id : "")
-      say(released.message || "Application released.")
+      say(released.message || strings.t("notice.appReleased"))
       refreshRows()
       return
     }
     if (key === "r") {
       event.accepted = true
       service.refreshCatalog()
-      say("Catalog refreshed.")
+      say(strings.t("notice.catalogRefreshed"))
       refreshRows()
       return
     }
@@ -1401,12 +1452,12 @@ Item {
       if (overlay.armedRemoveId !== missingId) {
         overlay.armedRemoveId = missingId
         armedRemoveTimer.restart()
-        say("Press x again to remove " + missingId + ".")
+        say(strings.t("notice.removeAgain").arg(missingId))
         return
       }
       overlay.armedRemoveId = ""
       var removed = service.removeMissing(missingId)
-      say(removed.message || "Missing entry removed.")
+      say(removed.message || strings.t("notice.missingRemoved"))
       refreshRows()
       return
     }
@@ -1420,10 +1471,10 @@ Item {
 
   function toggleManaged(app) {
     if (!app || app.kind === "header") return
-    if (app.missing) { say("This desktop entry no longer exists. Press x to remove it."); return }
+    if (app.missing) { say(strings.t("notice.missingEntryGone")); return }
     var result = service.setEnabled(app.id, !app.enabled)
     if (result.ok) {
-      say(app.enabled ? app.name + " is no longer managed." : app.name + " is managed.")
+      say(strings.t(app.enabled ? "notice.noLongerManaged" : "notice.nowManaged").arg(app.name))
     } else {
       say(result.message)
     }
@@ -1432,8 +1483,8 @@ Item {
 
   function beginShortcutAssign(app) {
     if (!app || app.kind === "header") return
-    if (app.missing) { say("Cannot bind a direct shortcut to a missing entry."); return }
-    if (!app.enabled) { say("Enable " + app.name + " before adding a direct shortcut."); return }
+    if (app.missing) { say(strings.t("notice.cannotBindMissing")); return }
+    if (!app.enabled) { say(strings.t("notice.enableBeforeShortcut").arg(app.name)); return }
     assigning = false
     assigningCommand = ""
     assigningShortcut = true
@@ -1503,7 +1554,7 @@ Item {
       shortcutAppId = ""
       shortcutSuggestion = ""
       if (!cleared.ok) say(cleared.message)
-      else { say("Direct shortcut cleared."); refreshRows() }
+      else { say(strings.t("notice.directShortcutCleared")); refreshRows() }
       return
     }
     var chord = ""
@@ -1514,14 +1565,14 @@ Item {
     } else {
       var name = shortcutKeyName(event)
       if (!name) {
-        var hint = "Use Super/Alt/Ctrl plus a letter, digit, F1-F24, arrow, Tab or Space."
+        var hint = strings.t("notice.shortcutInvalid")
         shortcutError = hint
         say(hint)
         return
       }
       var modifiers = shortcutModifiers(event)
       if (modifiers.length === 0 || (modifiers.length === 1 && modifiers[0] === "SHIFT")) {
-        var modHint = "Use Super, Alt or Ctrl with the key."
+        var modHint = strings.t("notice.shortcutModifier")
         shortcutError = modHint
         say(modHint)
         return
@@ -1534,7 +1585,7 @@ Item {
     if (!result.ok) { shortcutError = result.message; say(result.message); return }
     if (result.pending) {
       shortcutChecking = true
-      say("Checking existing Hyprland binds…")
+      say(strings.t("notice.checkingBinds"))
       return
     }
     assigningShortcut = false
@@ -1544,17 +1595,17 @@ Item {
     shortcutSuggestion = ""
     shortcutPendingChord = ""
     shortcutUsed = []
-    say("Direct shortcut: " + result.shortcut)
+    say(strings.t("notice.directShortcutSet").arg(result.shortcut))
     refreshRows()
   }
 
   function beginAssign(app) {
     if (!app || app.kind === "header") return
-    if (app.missing) { say("Cannot assign a key to a missing entry."); return }
-    if (!app.enabled) { say("Enable " + app.name + " before assigning its key."); return }
+    if (app.missing) { say(strings.t("notice.cannotAssignMissing")); return }
+    if (!app.enabled) { say(strings.t("notice.enableBeforeKey").arg(app.name)); return }
     assigning = true
     assignAppId = app.id
-    say("Press a key for " + app.name + " — Esc to cancel.")
+    say(strings.t("notice.pressKeyFor").arg(app.name))
     focusKeys()
   }
 
@@ -1585,7 +1636,7 @@ Item {
       pendingBarTouched = false
       barMoveDirty = false
       barConfig.reload()
-      say("Placement reloaded.")
+      say(strings.t("notice.placementReloaded"))
     }
   }
 
@@ -1593,14 +1644,14 @@ Item {
     if (event.key === Qt.Key_Up) { event.accepted = true; sel = Math.max(0, sel - 1); return }
     if (event.key === Qt.Key_Down) { event.accepted = true; sel = Math.min(rows.length - 1, sel + 1); return }
     var text = printable(event)
-    if (text === "r") { event.accepted = true; service.resetCommands(); refreshRows(); say("Shortcuts reset."); return }
+    if (text === "r") { event.accepted = true; service.resetCommands(); refreshRows(); say(strings.t("notice.shortcutsReset")); return }
     if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || text === "k") {
       event.accepted = true
       var row = rows[sel]
       if (!row) return
-      if (row.fixed) { say("Reduce is bound to Esc in the Hyprland integration."); return }
+      if (row.fixed) { say(strings.t("notice.reduceFixed")); return }
       assigningCommand = row.command
-      say("Press a key for " + row.label + " — Esc cancels.")
+      say(strings.t("notice.pressKeyFor").arg(overlay.rowLabel(row)))
       focusKeys()
     }
   }
@@ -1855,7 +1906,8 @@ Item {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               key: "esc"
-              label: (overlay.view === "palette" || overlay.view === "bar") ? "close" : "back"
+              label: (overlay.view === "palette" || overlay.view === "bar")
+                ? strings.t("manage.buttonClose") : strings.t("manage.buttonBack")
               onTriggered: overlay.goBack()
             }
           }
@@ -1877,7 +1929,9 @@ Item {
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: overlay.service && overlay.service.currentApp
-                ? overlay.service.currentApp.name + (overlay.service.currentApp.state === "hidden" ? " · hidden" : " · visible")
+                ? (overlay.service.currentApp.state === "hidden"
+                  ? strings.t("palette.currentHidden").arg(overlay.service.currentApp.name)
+                  : strings.t("palette.currentVisible").arg(overlay.service.currentApp.name))
                 : ""
               visible: text !== ""
               color: Commons.Color.accent
@@ -1894,8 +1948,8 @@ Item {
                 : (overlay.quitMode
                   ? overlay.quitPrompt()
                   : (overlay.service && overlay.service.enabledApps.length === 0
-                    ? "Press m to choose web apps to manage. The agent, terminal and file manager are optional."
-                    : "App key opens · tab click or Ctrl+Tab switches · Enter keeps · Esc hides."))
+                    ? strings.t("palette.chooseApps")
+                    : strings.t("palette.hint")))
               color: (overlay.quitMode || overlay.popoutMode) ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.3)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -1905,7 +1959,7 @@ Item {
 
             SectionTitle {
               visible: overlay.service && overlay.service.enabledApps.length > 0
-              title: "Most used"
+              title: strings.t("palette.mostUsed")
             }
 
             Row {
@@ -1968,7 +2022,7 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             text: overlay.localNoticeUrgent && overlay.localNotice !== ""
               ? overlay.localNotice
-              : "Press an app key to open its window. Navigation and plugin commands stay reserved."
+              : strings.t("palette.runningHint")
             color: overlay.localNoticeUrgent && overlay.localNotice !== ""
               ? Commons.Color.urgent
               : Qt.darker(Commons.Color.popups.text, 1.4)
@@ -2006,7 +2060,7 @@ Item {
                 anchors.left: parent.left
                 anchors.leftMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
-                text: modelData.kind === "header" ? modelData.label : ""
+                text: modelData.kind === "header" ? overlay.rowLabel(modelData) : ""
                 color: Qt.darker(Commons.Color.popups.text, 1.4)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
@@ -2102,7 +2156,7 @@ Item {
                   Text {
                     textFormat: Text.PlainText
                     width: parent.width
-                    text: overlay.windowTitle(modelData.id) || modelData.note || modelData.detail || ""
+                    text: overlay.windowTitle(modelData.id) || overlay.appSecondaryText(modelData)
                     color: Qt.darker(Commons.Color.popups.text, 1.35)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
@@ -2126,7 +2180,7 @@ Item {
                     textFormat: Text.PlainText
                     id: stateText
                     anchors.centerIn: parent
-                    text: Model.stateLabel(modelData.state)
+                    text: strings.t(Model.stateKey(modelData.state), Model.stateLabel(modelData.state))
                     color: modelData.state === "error" ? Commons.Color.urgent : Qt.darker(Commons.Color.popups.text, 1.2)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
@@ -2171,7 +2225,7 @@ Item {
                   textFormat: Text.PlainText
                   width: parent.width - 50
                   anchors.verticalCenter: parent.verticalCenter
-                  text: modelData.label || ""
+                  text: overlay.rowLabel(modelData)
                   color: Commons.Color.popups.text
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
@@ -2195,7 +2249,7 @@ Item {
             textFormat: Text.PlainText
             visible: overlay.view === "running" && overlay.rows.length === 0
             width: parent.width
-            text: "No managed application is running."
+            text: strings.t("palette.runningEmpty")
             color: Qt.darker(Commons.Color.popups.text, 1.45)
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
@@ -2211,7 +2265,7 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "Move the Dropdown widget between the left, centre and right sections of the Omarchy bar."
+              text: strings.t("bar.help")
               color: Qt.darker(Commons.Color.popups.text, 1.4)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -2220,17 +2274,21 @@ Item {
             }
 
             SettingRow {
-              label: "Section"
-              value: overlay.pendingBarSection === "" ? "not on bar" : overlay.pendingBarSection
+              label: strings.t("bar.section")
+              value: overlay.pendingBarSection === ""
+                ? strings.t("bar.notOnBar")
+                : overlay.enumLabel("barSection", overlay.pendingBarSection)
               selected: overlay.sel === 0
               onAdjust: function(delta) { overlay.sel = 0; overlay.cycleBarSection(delta) }
               onActivate: { overlay.sel = 0; overlay.cycleBarSection(1) }
             }
             SettingRow {
-              label: "Position in section"
+              label: strings.t("bar.positionInSection")
               value: overlay.pendingBarSection === ""
                 ? "—"
-                : (overlay.pendingBarIndex + 1) + " / " + overlay.pendingBarTotal(overlay.pendingBarSection)
+                : strings.t("bar.positionValue")
+                  .arg(overlay.number(overlay.pendingBarIndex + 1))
+                  .arg(overlay.number(overlay.pendingBarTotal(overlay.pendingBarSection)))
               selected: overlay.sel === 1
               disabled: overlay.pendingBarSection === ""
               onAdjust: function(delta) { overlay.sel = 1; overlay.stepBarIndex(delta) }
@@ -2260,7 +2318,9 @@ Item {
                   Text {
                     textFormat: Text.PlainText
                     anchors.centerIn: parent
-                    text: modelData + " · " + barCard.items + (barCard.items === 1 ? " item" : " items")
+                    text: strings.t("bar.card")
+                      .arg(overlay.enumLabel("barSection", modelData))
+                      .arg(strings.tn("bar.items", barCard.items).arg(overlay.number(barCard.items)))
                     horizontalAlignment: Text.AlignHCenter
                     color: active ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.3)
                     font.family: Style.font.family
@@ -2286,7 +2346,7 @@ Item {
             width: parent.width
             spacing: Style.space(4)
 
-            SectionTitle { title: "Palette commands" }
+            SectionTitle { title: strings.t("keys.paletteCommands") }
 
             Repeater {
               model: overlay.view === "keys" ? overlay.rows : []
@@ -2308,7 +2368,7 @@ Item {
                   anchors.right: keyCap.left
                   anchors.rightMargin: 12
                   anchors.verticalCenter: parent.verticalCenter
-                  text: modelData.label
+                  text: overlay.rowLabel(modelData)
                   color: modelData.fixed ? Qt.darker(Commons.Color.popups.text, 1.7) : Commons.Color.popups.text
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
@@ -2328,11 +2388,11 @@ Item {
                   onClicked: {
                     overlay.sel = index
                     if (modelData.fixed) {
-                      overlay.say("Reduce is bound to Esc in the Hyprland integration.")
+                      overlay.say(strings.t("notice.reduceFixed"))
                       return
                     }
                     overlay.assigningCommand = modelData.command
-                    overlay.say("Press a key for " + modelData.label + " — Esc cancels.")
+                    overlay.say(strings.t("notice.pressKeyFor").arg(overlay.rowLabel(modelData)))
                     overlay.focusKeys()
                   }
                 }
@@ -2344,7 +2404,7 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "The open shortcut is configured in ~/.config/hypr/dropdown.lua (primary / secondary), then run hyprctl reload. Defaults: Super+Alt+; and Super+;. Reduce is Esc."
+              text: strings.t("keys.openHelp")
               color: Qt.darker(Commons.Color.popups.text, 1.55)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -2389,7 +2449,7 @@ Item {
                 anchors.left: parent.left
                 anchors.leftMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Filter apps…   (↓ moves to the list, / returns here)"
+                text: strings.t("manage.filter")
                 color: Qt.darker(Commons.Color.popups.text, 1.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
@@ -2417,7 +2477,7 @@ Item {
                 SectionTitle {
                   visible: modelData.kind === "header"
                   anchors.fill: parent
-                  title: modelData.kind === "header" ? modelData.label : ""
+                  title: modelData.kind === "header" ? overlay.rowLabel(modelData) : ""
                 }
 
                 AppRow {
@@ -2438,7 +2498,7 @@ Item {
               textFormat: Text.PlainText
               visible: overlay.view === "manage" && overlay.rows.length === 0
               width: parent.width
-              text: "No matching application. Press Esc or / to clear the filter."
+              text: strings.t("manage.noMatch")
               color: Qt.darker(Commons.Color.popups.text, 1.45)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -2460,7 +2520,10 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               visible: overlay.assigning
-              text: overlay.assigning ? "Press a key for " + (overlay.service.findApp(overlay.assignAppId) ? overlay.service.findApp(overlay.assignAppId).name : "") + " — Esc cancels." : ""
+              text: overlay.assigning
+                ? strings.t("notice.pressKeyFor")
+                  .arg(overlay.service.findApp(overlay.assignAppId) ? overlay.service.findApp(overlay.assignAppId).name : "")
+                : ""
               color: Commons.Color.accent
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -2472,13 +2535,15 @@ Item {
               visible: overlay.assigningShortcut
               text: !overlay.assigningShortcut ? ""
                 : overlay.shortcutChecking
-                  ? "Checking existing Hyprland binds…"
+                  ? strings.t("notice.checkingBinds")
                   : overlay.shortcutError !== ""
-                    ? overlay.shortcutError + " Press another chord or Esc."
-                    : "Direct shortcut for " + (overlay.service.findApp(overlay.shortcutAppId) ? overlay.service.findApp(overlay.shortcutAppId).name : "") +
-                      " — press Super/Alt/Ctrl + key." +
-                      (overlay.shortcutSuggestion ? " Enter uses " + overlay.shortcutSuggestion + "." : "") +
-                      " Backspace clears, Esc cancels."
+                    ? strings.t("notice.shortcutErrorSuffix").arg(overlay.shortcutError)
+                    : (overlay.shortcutSuggestion
+                      ? strings.t("notice.shortcutPromptSuggestion")
+                        .arg(overlay.service.findApp(overlay.shortcutAppId) ? overlay.service.findApp(overlay.shortcutAppId).name : "")
+                        .arg(overlay.shortcutSuggestion)
+                      : strings.t("notice.shortcutPrompt")
+                        .arg(overlay.service.findApp(overlay.shortcutAppId) ? overlay.service.findApp(overlay.shortcutAppId).name : ""))
               color: overlay.shortcutError !== "" ? Commons.Color.urgent : Commons.Color.accent
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -2509,84 +2574,85 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "Position: " + String(overlay.geometry.placement || "center")
-                + " · slides in from the " + String(overlay.edge)
+              text: strings.t("settings.positionSummary")
+                .arg(overlay.enumLabel("placement", overlay.geometry.placement || "center"))
+                .arg(overlay.enumLabel("edge", overlay.edge))
               color: Qt.darker(Commons.Color.popups.text, 1.45)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
 
-            SectionTitle { title: "Display" }
+            SectionTitle { title: strings.t("settings.display") }
 
             SettingRow {
-              label: "Screen"
+              label: strings.t("settings.screen")
               value: overlay.screenLabel(overlay.service ? overlay.service.config.settings.screen : "auto")
               selected: overlay.sel === 0
               onAdjust: function(delta) { overlay.sel = 0; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 0; overlay.adjustSize(1) }
             }
 
-            SectionTitle { title: "Placement" }
+            SectionTitle { title: strings.t("settings.placement") }
 
             SettingRow {
-              label: "Preset"
-              value: String(overlay.geometry.preset || "custom")
+              label: strings.t("settings.preset")
+              value: overlay.enumLabel("preset", overlay.geometry.preset || "custom")
               selected: overlay.sel === 1
               onAdjust: function(delta) { overlay.sel = 1; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 1; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Position"
-              value: String(overlay.geometry.placement || "center")
+              label: strings.t("settings.position")
+              value: overlay.enumLabel("placement", overlay.geometry.placement || "center")
               selected: overlay.sel === 2
               onAdjust: function(delta) { overlay.sel = 2; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 2; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Slide from"
-              value: String(overlay.edge)
+              label: strings.t("settings.slideFrom")
+              value: overlay.enumLabel("edge", overlay.edge)
               selected: overlay.sel === 3
               onAdjust: function(delta) { overlay.sel = 3; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 3; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Width (% of monitor)"
-              value: Math.round(overlay.geometry.widthPercent) + "%"
+              label: strings.t("settings.width")
+              value: strings.t("value.percent").arg(overlay.number(Math.round(overlay.geometry.widthPercent)))
               selected: overlay.sel === 4
               onAdjust: function(delta) { overlay.sel = 4; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 4; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Height (% of monitor)"
-              value: Math.round(overlay.geometry.heightPercent) + "%"
+              label: strings.t("settings.height")
+              value: strings.t("value.percent").arg(overlay.number(Math.round(overlay.geometry.heightPercent)))
               selected: overlay.sel === 5
               onAdjust: function(delta) { overlay.sel = 5; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 5; overlay.adjustSize(1) }
             }
 
-            SectionTitle { title: "Offsets" }
+            SectionTitle { title: strings.t("settings.offsets") }
 
             SettingRow {
-              label: "Top offset"
-              value: Math.round(overlay.geometry.topOffset) + " px"
+              label: strings.t("settings.topOffset")
+              value: strings.t("value.px").arg(overlay.number(Math.round(overlay.geometry.topOffset)))
               selected: overlay.sel === 6
               onAdjust: function(delta) { overlay.sel = 6; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 6; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Side margin"
-              value: Math.round(overlay.geometry.sideMargin) + " px"
+              label: strings.t("settings.sideMargin")
+              value: strings.t("value.px").arg(overlay.number(Math.round(overlay.geometry.sideMargin)))
               selected: overlay.sel === 7
               onAdjust: function(delta) { overlay.sel = 7; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 7; overlay.adjustSize(1) }
             }
 
-            SectionTitle { title: "Tabs" }
+            SectionTitle { title: strings.t("settings.tabs") }
 
             SettingRow {
-              label: "Tab bar"
-              value: overlay.tabPosition
+              label: strings.t("settings.tabBar")
+              value: overlay.enumLabel("tabPosition", overlay.tabPosition)
               selected: overlay.sel === 8
               onAdjust: function(delta) { overlay.sel = 8; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 8; overlay.adjustSize(1) }
@@ -2596,7 +2662,7 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "The tab strip lists open managed windows. Ctrl+Tab cycles them; a click switches too."
+              text: strings.t("settings.tabsHint")
               color: Qt.darker(Commons.Color.popups.text, 1.5)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -2605,25 +2671,25 @@ Item {
             }
 
 
-            SectionTitle { title: "Behaviour" }
+            SectionTitle { title: strings.t("settings.behaviour") }
 
             SettingRow {
-              label: "Hide on focus loss"
-              value: overlay.service && overlay.service.config.settings.autoHideOnFocusLoss ? "on" : "off"
+              label: strings.t("settings.hideOnFocusLoss")
+              value: overlay.service && overlay.service.config.settings.autoHideOnFocusLoss ? strings.t("settings.on") : strings.t("settings.off")
               selected: overlay.sel === 9
               onAdjust: function(delta) { overlay.sel = 9; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 9; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Hide after focus loss"
-              value: (Math.round(Number(overlay.service ? overlay.service.config.settings.autoHideDelayMs : 5000) / 1000)) + " s"
+              label: strings.t("settings.hideAfterFocusLoss")
+              value: strings.t("value.seconds").arg(overlay.number(Math.round(Number(overlay.service ? overlay.service.config.settings.autoHideDelayMs : 5000) / 1000)))
               selected: overlay.sel === 10
               onAdjust: function(delta) { overlay.sel = 10; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 10; overlay.adjustSize(1) }
             }
             SettingRow {
-              label: "Top cards"
-              value: String(overlay.service ? overlay.service.config.settings.topApps : 5)
+              label: strings.t("settings.topCards")
+              value: overlay.number(overlay.service ? overlay.service.config.settings.topApps : 5)
               selected: overlay.sel === 11
               onAdjust: function(delta) { overlay.sel = 11; overlay.adjustSize(delta) }
               onActivate: { overlay.sel = 11; overlay.adjustSize(1) }
@@ -2633,7 +2699,7 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "Applies to every monitor; 90°/270° outputs are handled in layout coordinates."
+              text: strings.t("settings.monitorHint")
               color: Qt.darker(Commons.Color.popups.text, 1.55)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -2648,32 +2714,32 @@ Item {
             width: parent.width
             spacing: Style.space(4)
 
-            SectionTitle { title: "Palette" }
+            SectionTitle { title: strings.t("settings.palette") }
 
             SettingRow {
-              label: "Palette in / out"
+              label: strings.t("settings.paletteInOut")
               value: overlay.animationLabel(overlay.animations.mode)
               selected: overlay.sel === 0
               onAdjust: function(delta) { overlay.sel = 0; overlay.adjustAnim(delta) }
               onActivate: { overlay.sel = 0; overlay.adjustAnim(1) }
             }
             SettingRow {
-              label: "Duration"
-              value: Math.round(overlay.animations.durationMs) + " ms"
+              label: strings.t("settings.duration")
+              value: strings.t("value.ms").arg(overlay.number(Math.round(overlay.animations.durationMs)))
               selected: overlay.sel === 1
               onAdjust: function(delta) { overlay.sel = 1; overlay.adjustAnim(delta) }
               onActivate: { overlay.sel = 1; overlay.adjustAnim(1) }
             }
             SettingRow {
-              label: "Easing"
-              value: String(overlay.animations.easing || "outCubic")
+              label: strings.t("settings.easing")
+              value: overlay.enumLabel("easing", overlay.animations.easing || "outCubic")
               selected: overlay.sel === 2
               onAdjust: function(delta) { overlay.sel = 2; overlay.adjustAnim(delta) }
               onActivate: { overlay.sel = 2; overlay.adjustAnim(1) }
             }
             SettingRow {
-              label: "Reduced motion"
-              value: overlay.animations.reducedMotion ? "on" : "off"
+              label: strings.t("settings.reducedMotion")
+              value: overlay.animations.reducedMotion ? strings.t("settings.on") : strings.t("settings.off")
               selected: overlay.sel === 3
               onAdjust: function(delta) { overlay.sel = 3; overlay.adjustAnim(delta) }
               onActivate: { overlay.sel = 3; overlay.adjustAnim(1) }
@@ -2684,7 +2750,7 @@ Item {
               textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "The palette and the managed window slide from the configured edge. Dropdown never changes your Hyprland animation settings."
+              text: strings.t("settings.animationHint")
               color: Qt.darker(Commons.Color.popups.text, 1.55)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -2710,18 +2776,18 @@ Item {
               placement: String(overlay.geometry.placement || "center")
             }
 
-            SectionTitle { title: "Application size" }
+            SectionTitle { title: strings.t("settings.applicationSize") }
 
             SettingRow {
-              label: "Width (% of monitor)"
-              value: Math.round(overlay.effectiveAppSize().widthPercent) + "%"
+              label: strings.t("settings.width")
+              value: strings.t("value.percent").arg(overlay.number(Math.round(overlay.effectiveAppSize().widthPercent)))
               selected: overlay.sel === 0
               onAdjust: function(delta) { overlay.sel = 0; overlay.adjustAppSize(delta) }
               onActivate: { overlay.sel = 0; overlay.adjustAppSize(1) }
             }
             SettingRow {
-              label: "Height (% of monitor)"
-              value: Math.round(overlay.effectiveAppSize().heightPercent) + "%"
+              label: strings.t("settings.height")
+              value: strings.t("value.percent").arg(overlay.number(Math.round(overlay.effectiveAppSize().heightPercent)))
               selected: overlay.sel === 1
               onAdjust: function(delta) { overlay.sel = 1; overlay.adjustAppSize(delta) }
               onActivate: { overlay.sel = 1; overlay.adjustAppSize(1) }

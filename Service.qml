@@ -21,6 +21,54 @@ import "js/Keymap.js" as Keymap
 Item {
   id: service
 
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
+
+  // Translate a catalog key and fill its %1, %2, ... holes with data. Calling
+  // strings.t() from here keeps property bindings live when the language
+  // changes, because QML tracks the function's catalog reads.
+  function tr(key, args, fallback) {
+    var value = strings.t(key, fallback)
+    for (var i = 0; i < (args || []).length; i++) value = value.arg(String(args[i]))
+    return value
+  }
+
+  function tn(key, count, args) {
+    var value = strings.tn(key, count).arg(Commons.I18n.formatNumber(count))
+    for (var i = 0; i < (args || []).length; i++) value = value.arg(String(args[i]))
+    return value
+  }
+
+  function number(value) {
+    return Commons.I18n.formatNumber(value)
+  }
+
+  function keyErrorMessage(check) {
+    if (check && check.errorKey) return service.tr(check.errorKey, check.errorArgs)
+    return String((check && check.error) || "")
+  }
+
+  function shortcutMessage(check) {
+    if (check && check.messageKey) return service.tr(check.messageKey, check.messageArgs)
+    return String((check && check.message) || "")
+  }
+
+  function appConflictText(app) {
+    if (!app || !app.conflict) return ""
+    return service.tr(app.conflictKey, app.conflictArgs, app.conflict)
+  }
+
+  function appStateNoteInfo(app) {
+    var entry = app ? service.registry[app.id] : null
+    var win = entry ? service.clientByAddress(entry.address) : null
+    return State.stateNoteKey(app, entry, win, service.errors[app ? app.id : ""])
+  }
+
+  function appNoteText(app) {
+    var info = service.appStateNoteInfo(app)
+    if (!info) return ""
+    return service.tr(info.key, info.args, service.appStateNote(app))
+  }
+
   // Injected by omarchy-shell.
   property var shell: null
 
@@ -78,10 +126,11 @@ Item {
   }
   readonly property var currentApp: service.findApp(service.currentAppId)
   readonly property string barTooltip: {
-    if (service.currentAppId) return "Dropdown — " + (service.currentApp ? service.currentApp.name : service.currentAppId)
+    if (service.currentAppId) return service.tr("tooltip.current",
+      [service.currentApp ? service.currentApp.name : service.currentAppId])
     var last = service.findApp(service.lastAppId)
-    if (last) return "Dropdown — " + last.name + " is hidden"
-    return "Dropdown"
+    if (last) return service.tr("tooltip.hidden", [last.name])
+    return strings.t("tooltip.idle")
   }
 
   // ---- Persistence ---------------------------------------------------------
@@ -112,7 +161,7 @@ Item {
       if (!ConfigFile.looksLikeConfig(current)) {
         // Never replace the user's broken file or silently reset settings; a
         // later valid edit will be adopted normally.
-        service.notify("dropdown.json is not valid JSON; keeping the current settings.")
+        service.notify(service.tr("service.invalidConfig"))
         return
       }
       service.backupConfig()
@@ -121,7 +170,7 @@ Item {
     onLoadFailed: {
       service.configPendingChange = false
       if (service.configLoaded) {
-        service.notify("dropdown.json is no longer readable; keeping the current settings.")
+        service.notify(service.tr("service.unreadableConfig"))
         return
       }
       service.configLoaded = true
@@ -261,7 +310,7 @@ Item {
         delete next.apps[oldId]
         next.apps[app.id] = moved
         changed = true
-        service.notify("Moved settings from " + oldId + " to " + app.id + ".")
+        service.notify(service.tr("service.movedSettings", [oldId, app.id]))
         break
       }
     }
@@ -573,10 +622,12 @@ Item {
       if (url || pwa) {
         base.kind = "webapp"
         base.detail = pwa ? "Browser web app" : "Web app"
+        base.detailKey = pwa ? "detail.browserWebapp" : "detail.webapp"
         discovered.push(base)
       } else {
         base.kind = "app"
         base.detail = "Desktop app"
+        base.detailKey = "detail.desktopApp"
         ordinary.push(base)
       }
     }
@@ -599,6 +650,7 @@ Item {
       startupClass: term ? String(term.startupClass || "") : "",
       expectedClass: "apach.dropdown.terminal",
       detail: service.terminalDesktopId || "no default terminal",
+      detailKey: service.terminalDesktopId ? "" : "detail.noTerminal",
       available: service.terminalDesktopId !== "",
       url: ""
     })
@@ -612,6 +664,7 @@ Item {
       startupClass: "",
       expectedClass: "apach.dropdown.agent",
       detail: service.agentName || "no default agent",
+      detailKey: service.agentName ? "" : "detail.noAgent",
       available: service.agentName !== "",
       url: ""
     })
@@ -626,6 +679,7 @@ Item {
       startupClass: files ? String(files.startupClass || "") : "",
       expectedClass: "",
       detail: service.filesDesktopId || "no default file manager",
+      detailKey: service.filesDesktopId ? "" : "detail.noFiles",
       available: service.filesDesktopId !== "",
       url: ""
     })
@@ -649,8 +703,13 @@ Item {
       app.lastUsed = cfg ? (Number(cfg.lastUsed) || 0) : 0
       app.launchAtLogin = !!(cfg && cfg.launchAtLogin === true)
       app.state = service.stateFor(app.id)
+      var noteInfo = service.appStateNoteInfo(app)
       app.note = service.appStateNote(app)
+      app.noteKey = noteInfo ? noteInfo.key : ""
+      app.noteArgs = noteInfo ? noteInfo.args : []
       app.conflict = ""
+      app.conflictKey = ""
+      app.conflictArgs = []
     }
 
     // Resolve conflicts against the list being built, not the previous
@@ -667,13 +726,17 @@ Item {
       if (!row.key) continue
       if (reservedCommands.indexOf(row.key) >= 0) {
         row.conflict = "Key " + row.key + " is a palette command"
+        row.conflictKey = "conflict.paletteCommand"
+        row.conflictArgs = [row.key]
         continue
       }
       var same = keyMap[row.key] || []
       var others = same.filter(function(other) { return other.id !== row.id })
       if (others.length > 0) {
-        row.conflict = "Key " + row.key + " is also used by " +
-          others.map(function(other) { return other.name }).join(", ")
+        var names = others.map(function(other) { return other.name }).join(", ")
+        row.conflict = "Key " + row.key + " is also used by " + names
+        row.conflictKey = "conflict.alsoUsed"
+        row.conflictArgs = [row.key, names]
       }
     }
     service.catalog = list
@@ -697,6 +760,8 @@ Item {
         enabled: true,
         state: "error",
         note: "Desktop entry not found",
+        noteKey: "note.desktopMissing",
+        noteArgs: [],
         missing: true
       })
     }
@@ -715,9 +780,12 @@ Item {
       var app = list[i]
       var state = service.stateFor(app.id)
       var note = service.appStateNote(app)
-      if (state !== app.state || note !== app.note) {
+      var noteInfo = service.appStateNoteInfo(app)
+      var noteKey = noteInfo ? noteInfo.key : ""
+      var noteArgs = noteInfo ? noteInfo.args : []
+      if (state !== app.state || note !== app.note || noteKey !== app.noteKey) {
         if (next === list) next = list.slice()
-        next[i] = Object.assign({}, app, { state: state, note: note })
+        next[i] = Object.assign({}, app, { state: state, note: note, noteKey: noteKey, noteArgs: noteArgs })
       }
     }
     if (next !== list) service.catalog = next
@@ -792,7 +860,7 @@ Item {
         entries.push({ shortcut: service.catalog[i].shortcut })
     }
     if (Model.missingBinds(binds, entries).length > 0) {
-      service.notify("Re-applying Dropdown direct shortcuts.")
+      service.notify(service.tr("service.reapplyingShortcuts"))
       Quickshell.execDetached(["hyprctl", "reload"])
     }
   }
@@ -849,7 +917,7 @@ Item {
   function refreshCatalog() {
     service.refreshSystemDefaults()
     service.rebuildCatalog()
-    service.notify("Catalog refreshed.")
+    service.notify(service.tr("service.catalogRefreshed"))
   }
 
   function maybeAutostart() {
@@ -867,7 +935,7 @@ Item {
       service.startLaunch(app.id, service.focusedContext(), true)
       started++
     }
-    if (started > 0) service.notify("Started " + started + " starred application" + (started > 1 ? "s" : "") + " hidden.")
+    if (started > 0) service.notify(service.tn("service.startedHidden", started))
   }
 
   Timer {
@@ -1558,7 +1626,7 @@ Item {
         })
       }
       service.lastAppId = app.id
-      service.notify(app.name + " re-adopted.")
+      service.notify(service.tr("service.reAdopted", [app.name]))
       changed = true
     }
     if (changed) {
@@ -1774,12 +1842,12 @@ Item {
     var app = service.findApp(appId)
     if (!app) return
     if (!app.available) {
-      service.failLaunch(appId, app.note || "This application is not configured.")
+      service.failLaunch(appId, service.appNoteText(app) || service.tr("service.notConfigured"))
       return
     }
     var cmd = service.launchCommand(app)
     if (!cmd || cmd.argv.length === 0) {
-      service.failLaunch(appId, "No launch command could be built for " + app.name + ".")
+      service.failLaunch(appId, service.tr("service.noLaunchCommand", [app.name]))
       return
     }
     var snapshot = service.clients.map(function(win) { return String(win.address).toLowerCase() })
@@ -1810,7 +1878,7 @@ Item {
       service.launchViaHypr(cmd)
     })
     launchWatchTimer.restart()
-    service.notify("Launching " + app.name + "…")
+    service.notify(service.tr("service.launching", [app.name]))
     service.refreshCatalogState()
   }
 
@@ -2056,12 +2124,12 @@ Item {
     var existing = service.findUnmanagedWindow(app)
     if (existing) {
       service.setAdoptable(appId, existing.address)
-      service.failLaunch(appId, app.name + " is already open outside Dropdown. Open Manage and press o to adopt it.")
+      service.failLaunch(appId, service.tr("service.alreadyOpenOutside", [app.name]))
     } else {
       var expected = app.expectedClass || app.desktopId || app.id
-      service.failLaunch(appId, "No window appeared for " + app.name +
-        " within " + Math.round(service.launchTimeoutMs / 1000) + " s (expected class " +
-        expected + "). Run `omarchy-shell apach.dropdown doctor` for details.")
+      service.failLaunch(appId, service.tr("service.noWindowAppeared", [
+        app.name, service.number(Math.round(service.launchTimeoutMs / 1000)), expected
+      ]))
     }
   }
 
@@ -2179,11 +2247,11 @@ Item {
 
   function toggleApp(appId, context, ignoreConflict) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
-    if (!app.enabled) return { ok: false, message: app.name + " is not managed by Dropdown." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
+    if (!app.enabled) return { ok: false, message: service.tr("service.notManagedBy", [app.name]) }
     // A conflicting key blocks key dispatch, never an explicit open by id
     // (Enter, a click, or a preview card).
-    if (app.conflict && ignoreConflict !== true) return { ok: false, message: app.conflict + "." }
+    if (app.conflict && ignoreConflict !== true) return { ok: false, message: service.appConflictText(app) + "." }
     var entry = service.registry[appId]
     var win = entry ? service.clientByAddress(entry.address) : null
     if (entry && win) {
@@ -2214,7 +2282,7 @@ Item {
       return { ok: true, appId: appId }
     }
     if (entry && !win) service.forgetApp(appId)
-    if (service.launching[appId]) return { ok: false, message: app.name + " is still launching." }
+    if (service.launching[appId]) return { ok: false, message: service.tr("service.stillLaunchingApp", [app.name]) }
     var ctx = service.resolveContext(context || service.focusedContext())
     // Single-instance apps (Electron/Flatpak) may already have a window even
     // when the registry lost it. Adopt and reveal it instead of launching a
@@ -2392,7 +2460,7 @@ Item {
     // While the palette is open it owns Escape and re-arms the submap when it
     // closes. Switching tabs from the palette must not steal that focus.
     if (!service.paletteOpen) service.enterEscapeMode()
-    service.notify(app.name + " shown.")
+    service.notify(service.tr("service.shown", [app.name]))
     service.scheduleStateSave()
     service.refreshCatalogState()
   }
@@ -2460,7 +2528,7 @@ Item {
     if (service.currentAppId === appId) service.currentAppId = ""
     service.lastAppId = appId
     if (restoreFocus !== false) service.restoreFocusLater(entry.previousFocus)
-    service.notify((app ? app.name : appId) + " hidden.")
+    service.notify(service.tr("service.hidden", [app ? app.name : appId]))
     service.scheduleStateSave()
     service.refreshCatalogState()
   }
@@ -2493,13 +2561,13 @@ Item {
     service.cancelSlide()
     service.leaveEscapeMode()
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
-    if (service.launching[appId]) return { ok: false, message: app.name + " is still launching." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
+    if (service.launching[appId]) return { ok: false, message: service.tr("service.stillLaunchingApp", [app.name]) }
     var entry = service.registry[appId]
     var win = entry ? service.clientByAddress(entry.address) : null
     if (!entry || !win) {
       service.forgetApp(appId)
-      return { ok: false, message: app.name + " is not running." }
+      return { ok: false, message: service.tr("service.notRunning", [app.name]) }
     }
     if (entry.hidden) {
       // Bring it back on screen first, so a quit confirmation dialog is not
@@ -2512,7 +2580,7 @@ Item {
     watches[appId] = Date.now()
     service.closeWatches = watches
     closeWatchTimer.restart()
-    service.notify("Closing " + app.name + "…")
+    service.notify(service.tr("service.closing", [app.name]))
     service.scheduleStateSave()
     service.refreshCatalogState()
     return { ok: true, appId: appId }
@@ -2530,7 +2598,7 @@ Item {
       if (now - at < service.closeConfirmMs) { next[id] = at; continue }
       changed = true
       var app = service.findApp(id)
-      service.notify((app ? app.name : id) + " is waiting for confirmation.")
+      service.notify(service.tr("service.waitingConfirmation", [app ? app.name : id]))
     }
     if (changed) {
       service.closeWatches = next
@@ -2550,20 +2618,20 @@ Item {
 
   function hideVisibleCurrent() {
     var appId = service.currentAppId
-    if (!appId) return { ok: false, message: "No dropdown is open." }
+    if (!appId) return { ok: false, message: service.tr("service.noDropdownOpen") }
     var entry = service.registry[appId]
-    if (!entry || entry.hidden) return { ok: false, message: "No dropdown is open." }
+    if (!entry || entry.hidden) return { ok: false, message: service.tr("service.noDropdownOpen") }
     service.parkApp(appId, true)
     return { ok: true, appId: appId }
   }
 
   function hideTarget() {
     var appId = service.paletteTarget
-    if (!appId) return { ok: false, message: "No dropdown is open." }
+    if (!appId) return { ok: false, message: service.tr("service.noDropdownOpen") }
     var entry = service.registry[appId]
-    if (!entry) return { ok: false, message: "No dropdown is open." }
-    if (entry.hidden) return { ok: false, message: "This dropdown is already hidden." }
-    if (service.launching[appId]) return { ok: false, message: "Still launching." }
+    if (!entry) return { ok: false, message: service.tr("service.noDropdownOpen") }
+    if (entry.hidden) return { ok: false, message: service.tr("service.alreadyHidden") }
+    if (service.launching[appId]) return { ok: false, message: service.tr("service.stillLaunching") }
     // Return to the window that had focus when the palette was summoned, not
     // to an older window from the app's own history.
     var previous = Model.normalizeAddress(service.palettePreviousFocus)
@@ -2584,12 +2652,12 @@ Item {
 
   function adoptApp(appId) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
     var win = null
     if (service.adoptable[appId]) win = service.clientByAddress(service.adoptable[appId])
     if (!win) win = service.findUnmanagedWindow(app)
-    if (!win) return { ok: false, message: "No window of " + app.name + " found to adopt." }
-    if (service.addressManaged(win.address)) return { ok: false, message: "That window is already managed." }
+    if (!win) return { ok: false, message: service.tr("service.noWindowOf", [app.name]) }
+    if (service.addressManaged(win.address)) return { ok: false, message: service.tr("service.alreadyManaged") }
     var entry = {
       address: win.address,
       class: win.class,
@@ -2608,7 +2676,7 @@ Item {
     service.setAdoptable(appId, "")
     service.setError(appId, "")
     service.lastAppId = appId
-    if (entry.hidden) service.notify(app.name + " adopted while hidden.")
+    if (entry.hidden) service.notify(service.tr("service.adoptedHidden", [app.name]))
     else service.revealApp(appId, { monitor: entry.previousMonitor, workspace: entry.previousWorkspace }, win)
     service.scheduleStateSave()
     service.refreshCatalogState()
@@ -2620,7 +2688,7 @@ Item {
   function popOutApp(appId) {
     var app = service.findApp(appId)
     var entry = service.registry[appId]
-    if (!entry) return { ok: false, message: (app ? app.name : appId) + " is not managed." }
+    if (!entry) return { ok: false, message: service.tr("service.notManaged", [app ? app.name : appId]) }
     var win = service.clientByAddress(entry.address)
     var address = win ? win.address : ""
     var result = service.releaseApp(appId)
@@ -2629,14 +2697,14 @@ Item {
       service.unfloatWindow(address)
       service.focusWindow(address)
     }
-    service.notify((app ? app.name : appId) + " popped out as a normal window.")
+    service.notify(service.tr("service.poppedOut", [app ? app.name : appId]))
     return { ok: true, appId: appId }
   }
 
   function releaseApp(appId) {
     var app = service.findApp(appId)
     var entry = service.registry[appId]
-    if (!entry) return { ok: false, message: (app ? app.name : appId) + " is not managed." }
+    if (!entry) return { ok: false, message: service.tr("service.notManaged", [app ? app.name : appId]) }
     var releasedWin = service.clientByAddress(entry.address)
     if (releasedWin) {
       service.markReleased(releasedWin.address)
@@ -2660,7 +2728,7 @@ Item {
       }
     }
     service.forgetApp(appId)
-    service.notify((app ? app.name : appId) + " released as an ordinary window.")
+    service.notify(service.tr("service.released", [app ? app.name : appId]))
     return { ok: true, appId: appId }
   }
 
@@ -2668,8 +2736,8 @@ Item {
 
   function setEnabled(appId, enabled) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
-    if (enabled && !app.available) return { ok: false, message: app.name + " is not available: " + app.note }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
+    if (enabled && !app.available) return { ok: false, message: service.tr("service.notAvailable", [app.name, service.appNoteText(app)]) }
     var next = Model.clone(service.config)
     if (!next.apps[appId]) next.apps[appId] = {}
     var cfg = next.apps[appId]
@@ -2689,7 +2757,7 @@ Item {
           key = conventional
       }
       if (!key) key = Model.firstFreeKey(app.name, service.usedKeys(), reserved)
-      if (!key) return { ok: false, message: "No free key available for " + app.name + "." }
+      if (!key) return { ok: false, message: service.tr("service.noFreeKey", [app.name]) }
       var check = Model.validateKey(key, appId, service.catalog, system, commands)
       if (!check.ok) {
         var fallback = Model.firstFreeKey(app.name, service.usedKeys(), reserved)
@@ -2698,7 +2766,7 @@ Item {
           check = Model.validateKey(key, appId, service.catalog, system, commands)
         }
       }
-      if (!check.ok) return { ok: false, message: check.error }
+      if (!check.ok) return { ok: false, message: service.keyErrorMessage(check) }
       cfg.key = key
       if (cfg.shortcut) {
         for (var i = 0; i < service.enabledApps.length; i++) {
@@ -2738,18 +2806,18 @@ Item {
 
   function removeMissing(appId) {
     var next = Model.clone(service.config)
-    if (!next.apps[appId]) return { ok: false, message: "Nothing to remove." }
+    if (!next.apps[appId]) return { ok: false, message: service.tr("service.nothingToRemove") }
     delete next.apps[appId]
     service.config = next
     service.saveConfigNow()
     service.rebuildCatalog()
-    service.notify("Removed missing entry " + appId + ".")
+    service.notify(service.tr("service.removedMissing", [appId]))
     return { ok: true, appId: appId }
   }
 
   function applyAppShortcut(appId, chord) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
     var next = Model.clone(service.config)
     if (!next.apps[appId]) next.apps[appId] = {}
     if (chord) next.apps[appId].shortcut = Model.normalizeShortcut(chord)
@@ -2767,14 +2835,14 @@ Item {
 
   function validateShortcut(appId, value) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
-    if (!app.enabled) return { ok: false, message: "Enable " + app.name + " before adding a direct shortcut." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
+    if (!app.enabled) return { ok: false, message: service.tr("notice.enableBeforeShortcut", [app.name]) }
     var raw = String(value || "").trim()
     var chord = Model.normalizeShortcut(raw)
     if (raw !== "" && chord === "")
-      return { ok: false, message: "Use Super/Alt/Ctrl plus a letter, digit, function key, arrow or Tab." }
+      return { ok: false, message: service.tr("notice.shortcutInvalid") }
     var check = Shortcuts.validateShortcut(service.enabledApps, appId, chord)
-    if (!check.ok) return { ok: false, message: check.message }
+    if (!check.ok) return { ok: false, message: service.shortcutMessage(check) }
     return { ok: true, app: app, chord: chord }
   }
 
@@ -2787,12 +2855,12 @@ Item {
     var chord = check.chord
     if (chord === "") {
       var cleared = service.applyAppShortcut(appId, "")
-      if (cleared.ok) service.notify(app.name + " direct shortcut cleared.")
+      if (cleared.ok) service.notify(service.tr("service.directShortcutCleared", [app.name]))
       return cleared
     }
     if (app.shortcut === chord) return { ok: true, shortcut: chord }
     if (bindsCheckProc.running || service.pendingShortcut)
-      return { ok: false, message: "A shortcut check is already running." }
+      return { ok: false, message: service.tr("service.shortcutCheckRunning") }
     service.pendingShortcut = { appId: appId, chord: chord }
     bindsCheckProc.running = true
     bindsCheckTimeout.restart()
@@ -2808,7 +2876,7 @@ Item {
       var pending = service.pendingShortcut
       if (!pending) return
       service.pendingShortcut = null
-      service.shortcutRejected(pending.appId, "Hyprland did not answer the shortcut check. Try again.")
+      service.shortcutRejected(pending.appId, service.tr("service.shortcutCheckTimeout"))
     }
   }
 
@@ -2824,8 +2892,12 @@ Item {
     if (!Array.isArray(binds)) binds = []
     var mask = Model.shortcutModmask(pending.chord)
     var key = Model.hyprBindKey(pending.chord)
-    var conflict = Shortcuts.bindConflict(binds, mask, key, app.name, app.shortcut, pending.chord)
-    if (conflict) {
+    var info = Shortcuts.bindConflictInfo(binds, mask, key, app.name, app.shortcut, pending.chord)
+    if (info) {
+      var description = info.description || strings.t("shortcut.existingBind")
+      var conflict = info.submap
+        ? service.tr("shortcut.bindConflictSubmap", [info.chord, description, info.submap])
+        : service.tr("shortcut.bindConflict", [info.chord, description])
       service.notify(conflict)
       service.shortcutRejected(pending.appId, conflict)
       return
@@ -2836,7 +2908,7 @@ Item {
       service.shortcutRejected(pending.appId, result.message)
       return
     }
-    service.notify(app.name + " direct shortcut: " + pending.chord)
+    service.notify(service.tr("service.directShortcut", [app.name, pending.chord]))
     service.shortcutAssigned(pending.appId, pending.chord)
   }
 
@@ -2851,9 +2923,12 @@ Item {
 
   function assignKey(appId, key) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
     var check = Model.validateKey(key, appId, service.catalog, Model.enabledSystemMap(service.config), service.config.settings.commands)
-    if (!check.ok) return check
+    if (!check.ok) {
+      check.message = service.keyErrorMessage(check)
+      return check
+    }
     var next = Model.clone(service.config)
     if (!next.apps[appId]) next.apps[appId] = {}
     next.apps[appId].key = Model.normalizeKeyChar(key)
@@ -2889,7 +2964,7 @@ Item {
     service.saveConfigNow()
     service.rebuildCatalog()
     service.revalidateShownWindow()
-    service.notify("Size and animation settings reset.")
+    service.notify(service.tr("service.sizeReset"))
   }
 
   function appGeometry(appId) {
@@ -2918,7 +2993,7 @@ Item {
     service.saveConfigNow()
     service.rebuildCatalog()
     service.revalidateShownWindow()
-    service.notify("Size override cleared.")
+    service.notify(service.tr("service.sizeOverrideCleared"))
   }
 
   // ---- Palette -------------------------------------------------------------
@@ -3015,8 +3090,8 @@ Item {
 
   function cycleWindow(delta, context) {
     var list = service.runningWindows()
-    if (list.length === 0) return { ok: false, message: "No open window." }
-    if (list.length === 1) return { ok: false, message: "Only one window is open." }
+    if (list.length === 0) return { ok: false, message: service.tr("service.noOpenWindow") }
+    if (list.length === 1) return { ok: false, message: service.tr("service.onlyOneWindow") }
     var index = -1
     for (var i = 0; i < list.length; i++) if (list[i].id === service.currentAppId) index = i
     if (index < 0) index = delta > 0 ? -1 : 0
@@ -3339,7 +3414,7 @@ Item {
 
   function setLaunchAtLogin(appId, value) {
     var app = service.findApp(appId)
-    if (!app) return { ok: false, message: "Unknown application." }
+    if (!app) return { ok: false, message: service.tr("service.unknownApplication") }
     var next = Model.clone(service.config)
     if (!next.apps[appId]) next.apps[appId] = {}
     if (!next.apps[appId].key) next.apps[appId].key = app.key || ""
@@ -3347,22 +3422,22 @@ Item {
     service.config = next
     service.saveConfigNow()
     service.rebuildCatalog()
-    service.notify(app.name + (value ? " will start hidden at login." : " will no longer start at login."))
+    service.notify(service.tr(value ? "service.startAtLogin" : "service.noStartAtLogin", [app.name]))
     return { ok: true, appId: appId }
   }
 
   function setCommandKey(name, key) {
     var value = Model.normalizeKeyChar(key)
     var commands = service.config.settings.commands || Model.DEFAULT_COMMANDS
-    if (!commands[name]) return { ok: false, message: "Unknown command." }
-    if (!value) return { ok: false, message: "Use a single printable character; Escape is reserved for Reduce." }
+    if (!commands[name]) return { ok: false, message: service.tr("service.unknownCommand") }
+    if (!value) return { ok: false, message: service.tr("service.invalidCommandKey") }
     for (var other in commands) {
       if (other !== name && String(commands[other]) === value)
-        return { ok: false, message: "\"" + value + "\" is already used by " + other + "." }
+        return { ok: false, message: service.tr("service.keyAlreadyUsed", [value, other]) }
     }
     for (var i = 0; i < service.enabledApps.length; i++) {
       if (String(service.enabledApps[i].key) === value)
-        return { ok: false, message: "\"" + value + "\" is assigned to " + service.enabledApps[i].name + "." }
+        return { ok: false, message: service.tr("service.keyAssignedApp", [value, service.enabledApps[i].name]) }
     }
     var next = Model.clone(service.config)
     if (!next.settings.commands) next.settings.commands = Model.clone(Model.DEFAULT_COMMANDS)
@@ -3379,7 +3454,7 @@ Item {
     service.config = next
     service.saveConfigNow()
     service.rebuildCatalog()
-    service.notify("Shortcuts reset.")
+    service.notify(service.tr("service.shortcutsReset"))
   }
 
   function reduceCurrent() {
@@ -3409,9 +3484,9 @@ Item {
     if (service.currentAppId) {
       var app = service.findApp(service.currentAppId)
       service.parkApp(service.currentAppId, true)
-      return { ok: true, message: (app ? app.name : "Dropdown") + " hidden." }
+      return { ok: true, message: service.tr("service.hidden", [app ? app.name : strings.t("tooltip.idle")]) }
     }
-    return { ok: false, message: "No dropdown is open." }
+    return { ok: false, message: service.tr("service.noDropdownOpen") }
   }
 
   function enterEscapeMode() {

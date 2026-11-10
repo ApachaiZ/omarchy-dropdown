@@ -7,6 +7,8 @@ import qs.Commons as Commons
 // 1440 px-tall reference; it is a diagram, not a pixel-exact render.
 Item {
   id: preview
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
+
   property real monitorAspect: 16 / 9
   property real widthPercent: 60
   property real heightPercent: 80
@@ -58,7 +60,9 @@ Item {
     Text {
       textFormat: Text.PlainText
       anchors.centerIn: parent
-      text: Math.round(preview.widthPercent) + "% × " + Math.round(preview.heightPercent) + "%"
+      text: strings.t("geometry.size")
+        .arg(Commons.I18n.formatNumber(Math.round(preview.widthPercent)))
+        .arg(Commons.I18n.formatNumber(Math.round(preview.heightPercent)))
       color: Commons.Color.accent
       font.family: Style.font.family
       font.pixelSize: Style.font.caption

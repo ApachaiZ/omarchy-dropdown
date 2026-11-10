@@ -7,14 +7,26 @@ import qs.Commons as Commons
 // optional checkbox. Used by every list in the palette.
 Item {
   id: row
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
+
   property var app: null
   readonly property string secondaryLabel: {
     if (!row.app) return ""
     var parts = []
     if (row.app.shortcut) parts.push(String(row.app.shortcut))
-    var rest = row.app.conflict || row.app.note || row.app.detail || ""
+    var rest = ""
+    if (row.app.conflict) rest = row.tr(row.app.conflictKey, row.app.conflictArgs, row.app.conflict)
+    else if (row.app.noteKey) rest = row.tr(row.app.noteKey, row.app.noteArgs, row.app.note)
+    else if (row.app.detailKey) rest = row.tr(row.app.detailKey, [], row.app.detail)
+    else rest = String(row.app.note || row.app.detail || "")
     if (rest) parts.push(String(rest))
     return parts.join(" · ")
+  }
+
+  function tr(key, args, fallback) {
+    var value = key ? strings.t(key, fallback) : String(fallback || "")
+    for (var i = 0; i < (args || []).length; i++) value = value.arg(String(args[i]))
+    return value
   }
   property bool selected: false
   property bool showCheckbox: false

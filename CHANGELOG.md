@@ -4,6 +4,14 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.8.0 — 2026-11-10
+
+### Added
+
+- Native Omarchy translations: English and French catalogs covering every
+  palette, app, settings and conflict string, following Setup > Language live.
+  Languages without a catalog fall back to English.
+
 ## 0.7.15 — 2026-11-03
 
 ### Fixed

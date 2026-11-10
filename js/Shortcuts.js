@@ -38,16 +38,22 @@ function validateShortcut(apps, appId, chord) {
     if (!app || String(app.id) === String(appId)) continue
     if (app.enabled !== true || !app.shortcut) continue
     if (String(app.shortcut) === value) {
-      return { ok: false, message: value + " is already used by " + (app.name || app.id) + ".", chord: value }
+      var name = app.name || app.id
+      return {
+        ok: false,
+        message: value + " is already used by " + name + ".",
+        messageKey: "shortcut.alreadyUsed",
+        messageArgs: [value, name],
+        chord: value
+      }
     }
   }
   return { ok: true, chord: value }
 }
 
-// Find a conflicting Hyprland bind. `binds` is the parsed output of
-// `hyprctl binds -j`; mask and key come from Model.shortcutModmask/Key.
-// Reassigning an app to the chord it already owns is not a conflict.
-function bindConflict(binds, mask, key, appName, currentShortcut, chord) {
+// The parts of a conflicting Hyprland bind. Kept separate from the English
+// sentence so QML can render the same decision from its own catalogs.
+function bindConflictInfo(binds, mask, key, appName, currentShortcut, chord) {
   var wantedKey = String(key || "").toUpperCase()
   for (var i = 0; i < (binds || []).length; i++) {
     var bind = binds[i] || {}
@@ -56,12 +62,26 @@ function bindConflict(binds, mask, key, appName, currentShortcut, chord) {
     var description = String(bind.description || "").trim()
     if (description === "Dropdown: " + appName && currentShortcut === chord) continue
     var submap = String(bind.submap || "")
-    return String(chord) + " is already bound to " +
-      (description || "an existing Hyprland binding") +
-      (submap ? " (submap " + submap + ")" : "") +
-      ". Choose another chord or remove that bind."
+    return {
+      key: submap ? "shortcut.bindConflictSubmap" : "shortcut.bindConflict",
+      chord: String(chord),
+      description: description,
+      submap: submap
+    }
   }
-  return ""
+  return null
+}
+
+// Find a conflicting Hyprland bind. `binds` is the parsed output of
+// `hyprctl binds -j`; mask and key come from Model.shortcutModmask/Key.
+// Reassigning an app to the chord it already owns is not a conflict.
+function bindConflict(binds, mask, key, appName, currentShortcut, chord) {
+  var info = bindConflictInfo(binds, mask, key, appName, currentShortcut, chord)
+  if (!info) return ""
+  return info.chord + " is already bound to " +
+    (info.description || "an existing Hyprland binding") +
+    (info.submap ? " (submap " + info.submap + ")" : "") +
+    ". Choose another chord or remove that bind."
 }
 
 // Build the generated Hyprland bind file. `entries` are { id, name, shortcut }
@@ -106,6 +126,7 @@ if (typeof module !== "undefined") {
     header: header,
     validateShortcut: validateShortcut,
     bindConflict: bindConflict,
+    bindConflictInfo: bindConflictInfo,
     bindsFile: bindsFile,
     sortEntries: sortEntries
   }

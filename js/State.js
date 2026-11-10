@@ -23,6 +23,30 @@ function stateNote(app, entry, window, error) {
   return (window.workspace !== undefined ? "On workspace " + window.workspace : "") + startup
 }
 
+// Catalog form of stateNote: a key plus the data to interpolate, or null when
+// there is nothing to show. Whole strings carry the "starts at login" suffix so
+// the UI never glues translated fragments together.
+function stateNoteKey(app, entry, window, error) {
+  var source = app || {}
+  if (source.available === false) return { key: "note.notConfigured", args: [] }
+  if (error) return { key: "note.error", args: [String(error)] }
+  if (!entry) return source.launchAtLogin ? { key: "note.startsAtLogin", args: [] } : null
+  if (entry.hidden) {
+    return {
+      key: source.launchAtLogin ? "note.parkedLogin" : "note.parked",
+      args: [String(entry.special || "")]
+    }
+  }
+  if (!window) return { key: "note.windowClosed", args: [] }
+  if (window.workspace !== undefined) {
+    return {
+      key: source.launchAtLogin ? "note.workspaceLogin" : "note.workspace",
+      args: [String(window.workspace)]
+    }
+  }
+  return source.launchAtLogin ? { key: "note.startsAtLogin", args: [] } : null
+}
+
 
 // Pure focus-loss decision. Returns "" when the visible window still owns
 // focus, otherwise "workspace" (user switched to another workspace) or
@@ -48,6 +72,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     appState: appState,
     stateNote: stateNote,
+    stateNoteKey: stateNoteKey,
     autoHideReason: autoHideReason
   }
 }

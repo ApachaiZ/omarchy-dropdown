@@ -11,6 +11,8 @@ import "../js/Keymap.js" as Keymap
 Item {
   id: drawer
 
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
+
   property var apps: []
   property bool open: false
   property int selected: 0
@@ -72,7 +74,7 @@ Item {
       Text {
         textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
-        text: "All apps · " + drawer.count
+        text: strings.tn("drawer.toggle", drawer.count).arg(Commons.I18n.formatNumber(drawer.count))
         color: drawer.open ? Commons.Color.accent : Commons.Color.popups.text
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall

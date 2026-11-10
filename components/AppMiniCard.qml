@@ -8,6 +8,8 @@ import "../Model.js" as Model
 // the optional direct Hyprland shortcut without using a full palette row.
 Rectangle {
   id: card
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
+
   property var app: null
   property bool reveal: false
   property bool motionEnabled: true
@@ -111,7 +113,7 @@ Rectangle {
       textFormat: Text.PlainText
       width: parent.width
       text: card.app
-        ? (card.app.shortcut || Model.stateLabel(card.app.state))
+        ? (card.app.shortcut || strings.t(Model.stateKey(card.app.state), Model.stateLabel(card.app.state)))
         : ""
       color: card.app && card.app.shortcut
         ? Commons.Color.accent

@@ -794,16 +794,16 @@ function normalizeKeyChar(value) {
 
 function validateKey(key, appId, apps, enabledSystem, commands) {
   var value = normalizeKeyChar(key)
-  if (!value) return { ok: false, error: "Use a single printable character." }
+  if (!value) return { ok: false, error: "Use a single printable character.", errorKey: "key.singlePrintable", errorArgs: [] }
   var reserved = reservedKeys(enabledSystem, commands)
   if (reserved.indexOf(value) >= 0) {
-    return { ok: false, error: "\"" + value + "\" is a palette command. Pick another key." }
+    return { ok: false, error: "\"" + value + "\" is a palette command. Pick another key.", errorKey: "key.paletteCommand", errorArgs: [value] }
   }
   for (var i = 0; i < (apps || []).length; i++) {
     var app = apps[i]
     if (!app || app.enabled !== true || String(app.id) === String(appId)) continue
     if (String(app.key || "") === value) {
-      return { ok: false, error: "\"" + value + "\" is already used by " + (app.name || app.id) + "." }
+      return { ok: false, error: "\"" + value + "\" is already used by " + (app.name || app.id) + ".", errorKey: "key.alreadyUsed", errorArgs: [value, app.name || app.id] }
     }
   }
   return { ok: true, error: "" }
@@ -962,6 +962,15 @@ function stateLabel(state) {
   return labels[String(state || "")] || "Stopped"
 }
 
+// Catalog key for a state. UI code translates it, while stateLabel keeps the
+// English label for diagnostics and callers outside QML.
+function stateKey(state) {
+  var value = String(state || "")
+  if (["stopped", "launching", "visible", "hidden", "closing", "error"].indexOf(value) >= 0)
+    return "state." + value
+  return "state.stopped"
+}
+
 function applyPreset(geometry, preset) {
   var values = GEOMETRY_PRESETS[preset]
   if (!values) return geometry
@@ -1110,6 +1119,7 @@ if (typeof module !== "undefined") {
     parseBarPlacement: parseBarPlacement,
     setPath: setPath,
     stateLabel: stateLabel,
+    stateKey: stateKey,
     fuzzyScore: fuzzyScore,
     missingBinds: missingBinds,
     applyPreset: applyPreset,
