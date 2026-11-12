@@ -190,6 +190,11 @@
   "notice.barFailedNoReason": "Bar placement failed.",
   "notice.barApplied": "Bar placement applied.",
   "notice.reservedLabel": "reserved · %1",
+  "notice.clipboardTimeout": "Clipboard read timed out. Paste again.",
+  "notice.clipboardUnavailable": "The clipboard tool (wl-paste) is not available.",
+  "notice.clipboardTooLarge": "Clipboard content is too large to paste.",
+  "notice.clipboardTooLong": "Pasted text is longer than the %1-character filter.",
+  "notice.clipboardFailed": "The clipboard could not be read.",
 
   "bar.help": "Move the Dropdown widget between the left, centre and right sections of the Omarchy bar.",
   "bar.section": "Section",

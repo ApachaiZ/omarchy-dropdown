@@ -17,6 +17,8 @@ import "js/State.js" as State
 import "js/Shortcuts.js" as Shortcuts
 import "js/ConfigFile.js" as ConfigFile
 import "js/Keymap.js" as Keymap
+import "js/Bounds.js" as Bounds
+import "components"
 
 Item {
   id: service
@@ -141,74 +143,143 @@ Item {
   property bool configDirty: false
   property bool configPendingChange: false
 
+  // FileView is used for atomic writes and change notification only. Its
+  // content API is unbounded, so every read goes through a bounded helper:
+  // `head -c cap+1` under `timeout`, executed directly (no shell). A file
+  // larger than the cap is refused, never parsed partially.
   FileView {
     id: configView
     path: service.configPath
     watchChanges: true
     atomicWrites: true
+    preload: false
     printErrors: false
-    onLoaded: {
-      var current = String(text() || "")
-      if (!service.configLoaded) {
-        service.loadConfig(current)
-        return
-      }
-      if (!service.configPendingChange) return
-      service.configPendingChange = false
-      // Our own atomic write comes back as a file change. Reloading it would
-      // clobber edits made while the write was in flight.
-      if (ConfigFile.isOwnWrite(current, service.lastConfigWrite)) return
-      if (!ConfigFile.looksLikeConfig(current)) {
-        // Never replace the user's broken file or silently reset settings; a
-        // later valid edit will be adopted normally.
-        service.notify(service.tr("service.invalidConfig"))
-        return
-      }
-      service.backupConfig()
+    onFileChanged: service.configFileChanged()
+  }
+
+  BoundedProcess {
+    id: configReadProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: Bounds.LIMITS.configBytes
+    maxErrBytes: 4096
+    onFinished: function(result) { service.handleConfigRead(result) }
+  }
+
+  property bool configReadAgain: false
+
+  function readConfig() {
+    if (configReadProc.running) {
+      service.configReadAgain = true
+      return
+    }
+    configReadProc.start(Bounds.fileReadCommand(service.configPath, Bounds.LIMITS.configBytes))
+  }
+
+  function configFileChanged() {
+    service.configPendingChange = true
+    service.readConfig()
+  }
+
+  function handleConfigRead(result) {
+    var again = service.configReadAgain
+    service.configReadAgain = false
+    if (result.overflow || result.timedOut || result.startFailed) {
+      console.warn("omarchy-dropdown: dropdown.json could not be read within the " +
+        Bounds.LIMITS.configBytes + "-byte limit; keeping the previous configuration")
+      // A loaded configuration is never replaced by a read that failed; a
+      // transient timeout or an oversized file keeps the current settings.
+      if (!service.configLoaded) service.configReadFailed(false)
+    } else if (!result.ok) {
+      service.configReadFailed(true)
+    } else {
+      service.acceptConfigRead(result.out)
+    }
+    if (again && !configReadProc.running) service.readConfig()
+  }
+
+  // `mayCreate` is true only for a plain non-zero exit (missing or unreadable
+  // file), matching the previous FileView behaviour: the first start creates a
+  // default config. Overflow, timeout and failed start never overwrite a file
+  // they could not read.
+  function configReadFailed(mayCreate) {
+    service.configPendingChange = false
+    if (service.configLoaded) {
+      service.notify(service.tr("service.unreadableConfig"))
+      return
+    }
+    service.configLoaded = true
+    service.configDirty = false
+    service.config = Model.clone(Model.DEFAULT_CONFIG)
+    if (mayCreate) service.saveConfigNow()
+    service.rebuildCatalog()
+    autostartTimer.restart()
+  }
+
+  function acceptConfigRead(current) {
+    if (!service.configLoaded) {
       service.loadConfig(current)
+      return
     }
-    onLoadFailed: {
-      service.configPendingChange = false
-      if (service.configLoaded) {
-        service.notify(service.tr("service.unreadableConfig"))
-        return
-      }
-      service.configLoaded = true
-      service.configDirty = false
-      service.config = Model.clone(Model.DEFAULT_CONFIG)
+    if (!service.configPendingChange) return
+    service.configPendingChange = false
+    // Our own atomic write comes back as a file change. Reloading it would
+    // clobber edits made while the write was in flight.
+    if (ConfigFile.isOwnWrite(current, service.lastConfigWrite)) return
+    if (service.configDirty) {
+      // Local edits are newer than the file: keep them and rewrite.
+      service.backupConfig()
       service.saveConfigNow()
-      service.rebuildCatalog()
-      autostartTimer.restart()
+      return
     }
-    onFileChanged: {
-      var current = String(text() || "")
-      if (ConfigFile.isOwnWrite(current, service.lastConfigWrite)) return
-      if (service.configDirty) {
-        // Local edits are newer than the file: keep them and rewrite.
-        service.backupConfig()
-        service.saveConfigNow()
-        return
-      }
-      service.configPendingChange = true
-      configView.reload()
+    if (!ConfigFile.looksLikeConfig(current)) {
+      // Never replace the user's broken file or silently reset settings; a
+      // later valid edit will be adopted normally.
+      service.notify(service.tr("service.invalidConfig"))
+      return
     }
+    service.backupConfig()
+    service.loadConfig(current)
   }
 
   // The state file is written by this service only. It is read once at
   // startup; watching our own writes would reload a stale snapshot and
-  // re-adopt windows that were just released or popped out.
+  // re-adopt windows that were just released or popped out. The write path
+  // uses FileView; the read path is bounded and capped below.
   FileView {
     id: stateView
     path: service.statePath
     atomicWrites: true
+    preload: false
     printErrors: false
-    onLoaded: service.loadState(text())
-    onLoadFailed: {
-      service.stateLoaded = true
-      service.savedRegistry = {}
-      service.recoverFromSaved()
-      autostartTimer.restart()
+  }
+
+  BoundedProcess {
+    id: stateReadProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: Bounds.LIMITS.stateBytes
+    maxErrBytes: 4096
+    onFinished: function(result) { service.handleStateRead(result) }
+  }
+
+  function readState() {
+    if (stateReadProc.running) return
+    stateReadProc.start(Bounds.fileReadCommand(service.statePath, Bounds.LIMITS.stateBytes))
+  }
+
+  function handleStateRead(result) {
+    if (result.ok) {
+      service.loadState(result.out)
+      return
     }
+    if (result.overflow)
+      console.warn("omarchy-dropdown: dropdown-state.json exceeds " +
+        Bounds.LIMITS.stateBytes + " bytes; ignoring it")
+    service.stateLoaded = true
+    service.savedRegistry = {}
+    service.recoverFromSaved()
+    autostartTimer.restart()
   }
 
   property var savedRegistry: ({})
@@ -344,12 +415,19 @@ Item {
     var parsed = null
     try { parsed = JSON.parse(String(raw || "")) } catch (e) { parsed = null }
     var out = {}
+    var count = 0
     if (parsed && parsed.apps && typeof parsed.apps === "object") {
       for (var id in parsed.apps) {
         if (!Object.prototype.hasOwnProperty.call(parsed.apps, id)) continue
         if (id === "__proto__" || id === "constructor" || id === "prototype") continue
+        if (count >= Bounds.LIMITS.stateEntries) {
+          console.warn("omarchy-dropdown: dropdown-state.json has more than " +
+            Bounds.LIMITS.stateEntries + " entries; ignoring the rest")
+          break
+        }
         var entry = parsed.apps[id]
         if (!entry || !Model.validAddress(entry.address)) continue
+        count++
         // Older builds recorded a parking workspace here; it is not a real
         // destination and must be dropped when the state is recovered.
         var previousWorkspace = String(entry.previousWorkspace || "")
@@ -429,44 +507,81 @@ Item {
 
   // ---- System defaults -----------------------------------------------------
 
-  Process {
+  BoundedProcess {
     id: terminalIdProc
-    command: ["xdg-terminal-exec", "--print-id"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var id = String(text || "").trim().split(":")[0]
+    producerBound: true
+    producerTimeoutSeconds: 2
+    timeoutMs: 3000
+    maxOutBytes: 4096
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      if (result.ok) {
+        var id = String(result.out || "").trim().split(":")[0]
         id = id.replace(/\.desktop$/, "")
         if (id && id !== service.terminalDesktopId) {
           service.terminalDesktopId = id
-          service.rebuildCatalog()
         }
       }
+      service.rebuildCatalog()
     }
-    onExited: service.rebuildCatalog()
   }
 
-  Process {
+  BoundedProcess {
     id: filesIdProc
-    command: ["xdg-mime", "query", "default", "inode/directory"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var id = String(text || "").trim().replace(/\.desktop$/, "")
+    producerBound: true
+    producerTimeoutSeconds: 2
+    timeoutMs: 3000
+    maxOutBytes: 4096
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      if (result.ok) {
+        var id = String(result.out || "").trim().replace(/\.desktop$/, "")
         if (id !== service.filesDesktopId) {
           service.filesDesktopId = id
-          service.rebuildCatalog()
         }
       }
+      service.rebuildCatalog()
     }
-    onExited: service.rebuildCatalog()
   }
 
+  // The default agent name is one line in a user-writable file. FileView is
+  // only a change notification; the content is read through a bounded helper.
   FileView {
     id: agentView
     path: service.agentPath
     watchChanges: true
+    preload: false
     printErrors: false
-    onLoaded: service.loadAgent(text())
-    onFileChanged: reload()
+    onFileChanged: service.readAgent()
+  }
+
+  BoundedProcess {
+    id: agentReadProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: Bounds.LIMITS.agentBytes
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      var again = service.agentReadAgain
+      service.agentReadAgain = false
+      if (result.overflow) {
+        console.warn("omarchy-dropdown: the agent file exceeds " +
+          Bounds.LIMITS.agentBytes + " bytes; ignoring it")
+      } else if (result.ok) {
+        service.loadAgent(result.out)
+      }
+      if (again && !agentReadProc.running) service.readAgent()
+    }
+  }
+
+  property bool agentReadAgain: false
+
+  function readAgent() {
+    if (agentReadProc.running) {
+      service.agentReadAgain = true
+      return
+    }
+    agentReadProc.start(Bounds.fileReadCommand(service.agentPath, Bounds.LIMITS.agentBytes))
   }
 
   function loadAgent(raw) {
@@ -477,9 +592,11 @@ Item {
   }
 
   function refreshSystemDefaults() {
-    if (!terminalIdProc.running) terminalIdProc.running = true
-    if (!filesIdProc.running) filesIdProc.running = true
-    agentView.reload()
+    if (!terminalIdProc.running)
+      terminalIdProc.start(["xdg-terminal-exec", "--print-id"])
+    if (!filesIdProc.running)
+      filesIdProc.start(["xdg-mime", "query", "default", "inode/directory"])
+    service.readAgent()
   }
 
   // ---- Catalog -------------------------------------------------------------
@@ -597,6 +714,11 @@ Item {
     for (var i = 0; i < values.length; i++) {
       var entry = values[i]
       if (!entry || !entry.id) continue
+      if (discovered.length + ordinary.length >= Bounds.LIMITS.catalogApps) {
+        console.warn("omarchy-dropdown: more than " + Bounds.LIMITS.catalogApps +
+          " desktop entries; ignoring the rest")
+        break
+      }
       var id = String(entry.id)
       if (seenIds[id] || defaultIds[id]) continue
       seenIds[id] = true
@@ -827,12 +949,21 @@ Item {
   // the generated file was mid-write (or before it existed), the direct binds
   // are missing even though the file is correct. Verify the live bind table
   // and reload again when a generated bind is absent.
-  Process {
+  BoundedProcess {
     id: bindsVerifyProc
-    command: ["hyprctl", "binds", "-j"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: service.handleBindsVerify(String(text || ""))
+    producerBound: true
+    producerTimeoutSeconds: 3
+    timeoutMs: 3500
+    maxOutBytes: Bounds.LIMITS.hyprOutputBytes
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
+      if (result.ok) {
+        service.handleBindsVerify(result.out)
+        return
+      }
+      // A truncated or failed bind table must never be parsed as complete.
+      console.warn("omarchy-dropdown: hyprctl binds verification failed (" +
+        service.helperDetail(result) + ")")
     }
   }
 
@@ -847,7 +978,7 @@ Item {
     if (Date.now() - service.lastBindVerifyAt < 3000) return
     if (bindsVerifyProc.running) return
     service.lastBindVerifyAt = Date.now()
-    bindsVerifyProc.running = true
+    bindsVerifyProc.start(["hyprctl", "binds", "-j"])
   }
 
   function handleBindsVerify(raw) {
@@ -865,22 +996,40 @@ Item {
     }
   }
 
+  // The generated binds file is written by setText; its content is read
+  // through a bounded helper so a huge file can never be loaded whole.
   FileView {
     id: bindsView
     path: service.bindsPath
     atomicWrites: true
+    preload: false
     printErrors: false
-    onLoaded: {
-      service.bindsLoaded = true
-      service.lastBindsContent = text()
-      service.syncBinds()
-      service.verifyBinds()
+  }
+
+  BoundedProcess {
+    id: bindsReadProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: Bounds.LIMITS.bindsBytes
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      if (result.overflow)
+        console.warn("omarchy-dropdown: the generated binds file exceeds " +
+          Bounds.LIMITS.bindsBytes + " bytes; regenerating it")
+      service.finishBindsLoad(result.ok && !result.overflow ? result.out : "")
     }
-    onLoadFailed: {
-      service.bindsLoaded = true
-      service.lastBindsContent = ""
-      service.syncBinds()
-    }
+  }
+
+  function readBinds() {
+    if (bindsReadProc.running) return
+    bindsReadProc.start(Bounds.fileReadCommand(service.bindsPath, Bounds.LIMITS.bindsBytes))
+  }
+
+  function finishBindsLoad(raw) {
+    service.bindsLoaded = true
+    service.lastBindsContent = String(raw || "")
+    service.syncBinds()
+    service.verifyBinds()
   }
 
   // Enabled web apps always carry a free key. This is what makes a newly
@@ -952,37 +1101,66 @@ Item {
   property bool orphanCheckDone: false
   property int lastBindVerifyAt: 0
   property bool clientRefreshAgain: false
+  readonly property int queueLimit: Bounds.LIMITS.queueItems
+  readonly property int callbackMaxAgeMs: Bounds.LIMITS.callbackMaxAgeMs
 
-  Process {
+  BoundedProcess {
     id: clientsProc
-    command: ["hyprctl", "clients", "-j"]
-    stdout: StdioCollector {
-      onStreamFinished: service.handleClients(String(text || ""))
-    }
-  }
-
-  Process {
-    id: monitorsProc
-    command: ["hyprctl", "monitors", "-j"]
-    stdout: StdioCollector {
-      onStreamFinished: service.handleMonitors(String(text || ""))
-    }
-  }
-
-  Process {
-    id: dispatchProc
-    property string currentExpression: ""
-    stderr: StdioCollector {
-      id: dispatchErr
-      waitForEnd: true
-    }
-    onExited: function(exitCode, exitStatus) {
-      if (Number(exitCode) !== 0) {
-        var detail = String(dispatchErr.text || "").trim()
-        service.noteHyprFailure(dispatchProc.currentExpression, detail, Number(exitCode))
+    producerBound: true
+    producerTimeoutSeconds: 4
+    timeoutMs: 4500
+    maxOutBytes: Bounds.LIMITS.hyprOutputBytes
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
+      if (result.ok) {
+        service.handleClients(result.out)
+        return
       }
+      service.handleClientsFailure(result)
+    }
+  }
+
+  BoundedProcess {
+    id: monitorsProc
+    producerBound: true
+    producerTimeoutSeconds: 4
+    timeoutMs: 4500
+    maxOutBytes: Bounds.LIMITS.hyprOutputBytes
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
+      if (result.ok) {
+        service.handleMonitors(result.out)
+        return
+      }
+      service.handleMonitorsFailure(result)
+    }
+  }
+
+  BoundedProcess {
+    id: dispatchProc
+    producerBound: false
+    timeoutMs: 4000
+    maxOutBytes: 4096
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    property string currentExpression: ""
+    onFinished: function(result) {
+      if (!result.ok && !result.canceled) {
+        service.noteHyprFailure(dispatchProc.currentExpression,
+          service.helperDetail(result), result.code)
+      }
+      dispatchProc.currentExpression = ""
       service.pumpDispatch()
     }
+  }
+
+  // Human-readable detail for a failed helper result (console and `doctor`).
+  function helperDetail(result) {
+    if (!result) return ""
+    if (result.overflow) return "output limit exceeded"
+    if (result.timedOut) return "timed out"
+    if (result.startFailed) return "could not start"
+    var detail = String(result.err || "").trim()
+    return detail
   }
 
   // Surface a Hyprland dispatch failure instead of dropping it. The same
@@ -996,12 +1174,28 @@ Item {
   }
 
   function refreshClients(callback) {
-    if (typeof callback === "function") service.clientCallbacks.push(callback)
+    if (typeof callback === "function") {
+      var pushed = Bounds.pushCallback(service.clientCallbacks, callback, service.queueLimit, Date.now())
+      service.clientCallbacks = pushed.queue
+      if (pushed.dropped > 0)
+        console.warn("omarchy-dropdown: client callback queue full; dropped " +
+          pushed.dropped + " oldest callback(s)")
+    }
     if (clientsProc.running) {
       service.clientRefreshAgain = true
       return
     }
-    clientsProc.running = true
+    clientsProc.start(["hyprctl", "clients", "-j"])
+  }
+
+  // A failed, truncated or timed-out query must not look like "every window
+  // disappeared": keep the last good client list, drain the waiters and keep
+  // the launch watchdog alive so a launch still times out correctly.
+  function handleClientsFailure(result) {
+    console.warn("omarchy-dropdown: hyprctl clients failed (" + service.helperDetail(result) +
+      "); keeping the registry")
+    service.checkLaunches()
+    service.drainClientCallbacks()
   }
 
   function handleClients(raw) {
@@ -1044,8 +1238,11 @@ Item {
   }
 
   function drainClientCallbacks() {
-    var callbacks = service.clientCallbacks.slice()
+    var taken = Bounds.takeFreshCallbacks(service.clientCallbacks, Date.now(), service.callbackMaxAgeMs)
     service.clientCallbacks = []
+    if (taken.stale > 0)
+      console.warn("omarchy-dropdown: ignored " + taken.stale + " stale client callback(s)")
+    var callbacks = taken.callbacks
     // One failing callback must not starve the others (for example the
     // pending launch callback that starts an application).
     for (var i = 0; i < callbacks.length; i++) {
@@ -1062,27 +1259,52 @@ Item {
   }
 
   function refreshMonitors(callback) {
-    if (typeof callback === "function") service.monitorCallbacks.push(callback)
+    if (typeof callback === "function") {
+      var pushed = Bounds.pushCallback(service.monitorCallbacks, callback, service.queueLimit, Date.now())
+      service.monitorCallbacks = pushed.queue
+      if (pushed.dropped > 0)
+        console.warn("omarchy-dropdown: monitor callback queue full; dropped " +
+          pushed.dropped + " oldest callback(s)")
+    }
     if (monitorsProc.running) return
-    monitorsProc.running = true
+    monitorsProc.start(["hyprctl", "monitors", "-j"])
   }
 
   property var monitorCallbacks: []
   property bool monitorCheckPending: false
 
+  function takeMonitorCallbacks() {
+    var taken = Bounds.takeFreshCallbacks(service.monitorCallbacks, Date.now(), service.callbackMaxAgeMs)
+    service.monitorCallbacks = []
+    if (taken.stale > 0)
+      console.warn("omarchy-dropdown: ignored " + taken.stale + " stale monitor callback(s)")
+    return taken.callbacks
+  }
+
+  function handleMonitorsFailure(result) {
+    console.warn("omarchy-dropdown: hyprctl monitors failed (" + service.helperDetail(result) +
+      "); keeping the previous layout")
+    var pending = service.takeMonitorCallbacks()
+    for (var p = 0; p < pending.length; p++) {
+      try { pending[p]() } catch (e) { console.warn("omarchy-dropdown: monitor callback failed: " + String(e)) }
+    }
+  }
+
   function handleMonitors(raw) {
     var parsed = Model.parseMonitorsChecked(raw)
     if (parsed === null) {
       console.warn("omarchy-dropdown: hyprctl monitors returned no usable data; keeping the previous layout")
-      var pending = service.monitorCallbacks.slice()
-      service.monitorCallbacks = []
-      for (var p = 0; p < pending.length; p++) pending[p]()
+      var pending = service.takeMonitorCallbacks()
+      for (var p = 0; p < pending.length; p++) {
+        try { pending[p]() } catch (e) { console.warn("omarchy-dropdown: monitor callback failed: " + String(e)) }
+      }
       return
     }
     service.monitors = parsed
-    var callbacks = service.monitorCallbacks.slice()
-    service.monitorCallbacks = []
-    for (var i = 0; i < callbacks.length; i++) callbacks[i]()
+    var callbacks = service.takeMonitorCallbacks()
+    for (var i = 0; i < callbacks.length; i++) {
+      try { callbacks[i]() } catch (e) { console.warn("omarchy-dropdown: monitor callback failed: " + String(e)) }
+    }
     if (service.monitorCheckPending) {
       service.monitorCheckPending = false
       service.revalidateShownWindow()
@@ -1225,7 +1447,11 @@ Item {
   }
 
   function hypr(expression) {
-    service.dispatchQueue.push(String(expression))
+    var pushed = Bounds.pushBounded(service.dispatchQueue, String(expression), service.queueLimit)
+    service.dispatchQueue = pushed.queue
+    if (pushed.dropped > 0)
+      console.warn("omarchy-dropdown: dispatch queue full; dropped " +
+        pushed.dropped + " oldest expression(s)")
     service.pumpDispatch()
   }
 
@@ -1234,8 +1460,7 @@ Item {
     if (service.dispatchQueue.length === 0) return
     var next = service.dispatchQueue.shift()
     dispatchProc.currentExpression = next
-    dispatchProc.command = ["hyprctl", "dispatch", next]
-    dispatchProc.running = true
+    dispatchProc.start(["hyprctl", "dispatch", next])
   }
 
   // Detached dispatches survive QML destruction (plugin disable, shell
@@ -1249,16 +1474,15 @@ Item {
   // "resize", "move to workspace" and "move off screen".
   property var batchCallback: null
 
-  Process {
+  BoundedProcess {
     id: batchProc
-    stderr: StdioCollector {
-      id: batchErr
-      waitForEnd: true
-    }
-    onExited: function(exitCode) {
-      if (Number(exitCode) !== 0) {
-        service.noteHyprFailure("a batched reveal", String(batchErr.text || "").trim(), Number(exitCode))
-      }
+    producerBound: false
+    timeoutMs: 4000
+    maxOutBytes: 4096
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
+      if (!result.ok && !result.canceled)
+        service.noteHyprFailure("a batched reveal", service.helperDetail(result), result.code)
       var callback = service.batchCallback
       service.batchCallback = null
       if (typeof callback === "function") callback()
@@ -1279,8 +1503,7 @@ Item {
       return
     }
     service.batchCallback = typeof callback === "function" ? callback : null
-    batchProc.command = command
-    batchProc.running = true
+    batchProc.start(command)
   }
 
   function focusExpr(address) {
@@ -1839,6 +2062,9 @@ Item {
   // ---- Launching -----------------------------------------------------------
 
   function startLaunch(appId, context, hiddenOnStart) {
+    // A duplicate request while the app is already launching would spawn a
+    // second process and leave two windows for one tab.
+    if (service.launching[appId]) return
     var app = service.findApp(appId)
     if (!app) return
     if (!app.available) {
@@ -1878,6 +2104,7 @@ Item {
       service.launchViaHypr(cmd)
     })
     launchWatchTimer.restart()
+    launchGuardTimer.restart()
     service.notify(service.tr("service.launching", [app.name]))
     service.refreshCatalogState()
   }
@@ -1898,17 +2125,17 @@ Item {
       ", expires = os.time() + 30 }"
   }
 
-  Process {
+  BoundedProcess {
     id: launchArmProc
-    stderr: StdioCollector {
-      id: launchArmError
-      waitForEnd: true
-    }
-    onExited: function(code) {
-      if (Number(code) !== 0) {
-        var detail = String(launchArmError.text || "").trim().split("\n")[0]
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: 4096
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
+      if (!result.ok && !result.canceled) {
+        var detail = service.helperDetail(result).split("\n")[0]
         console.warn("omarchy-dropdown: launch preemption unavailable" +
-          (detail ? ": " + detail : " (exit " + code + ")"))
+          (detail ? ": " + detail : " (exit " + result.code + ")"))
       }
       var current = service.launchArmCurrent
       service.launchArmCurrent = null
@@ -1934,6 +2161,14 @@ Item {
       if (typeof callback === "function") Qt.callLater(callback)
       return
     }
+    // Saturation must not lose the launch: start it without preemption. The
+    // callback runs exactly once, through the event loop.
+    if (service.launchArmQueue.length >= Bounds.LIMITS.launchArmItems) {
+      console.warn("omarchy-dropdown: launch preemption queue full; launching " +
+        appId + " without preemption")
+      if (typeof callback === "function") Qt.callLater(callback)
+      return
+    }
     service.launchArmQueue.push({
       appId: String(appId),
       entry: entry,
@@ -1947,8 +2182,7 @@ Item {
     if (service.launchArmQueue.length === 0) return
     var item = service.launchArmQueue.shift()
     service.launchArmCurrent = item
-    launchArmProc.command = ["hyprctl", "eval", service.armLaunchLua(item.appId, item.entry)]
-    launchArmProc.running = true
+    launchArmProc.start(["hyprctl", "eval", service.armLaunchLua(item.appId, item.entry)])
   }
 
   // Fire and forget: the reveal must not wait for the compositor to forget
@@ -1964,6 +2198,17 @@ Item {
     repeat: true
     running: false
     onTriggered: service.refreshClients()
+  }
+
+  // Watchdog: the launch deadline must expire even when `hyprctl clients`
+  // fails, times out or its output is truncated, so `handleClients` is never
+  // the only path to a timeout.
+  Timer {
+    id: launchGuardTimer
+    interval: 1000
+    repeat: true
+    running: false
+    onTriggered: service.checkLaunches()
   }
 
   function launchCommand(app) {
@@ -2025,6 +2270,7 @@ Item {
     for (var id in service.launching) hasLaunches = true
     if (!hasLaunches) {
       launchWatchTimer.stop()
+      launchGuardTimer.stop()
       return
     }
     var next = {}
@@ -2055,8 +2301,13 @@ Item {
     }
     service.launching = next
     for (var i = 0; i < timeout.length; i++) service.handleLaunchTimeout(timeout[i].id)
-    if (Object.keys(next).length > 0) launchWatchTimer.start()
-    else launchWatchTimer.stop()
+    if (Object.keys(next).length > 0) {
+      launchWatchTimer.start()
+      launchGuardTimer.start()
+    } else {
+      launchWatchTimer.stop()
+      launchGuardTimer.stop()
+    }
   }
 
   function findNewWindow(app, state) {
@@ -2188,6 +2439,10 @@ Item {
     var next = {}
     for (var id in service.launching) if (id !== appId) next[id] = service.launching[id]
     service.launching = next
+    if (Object.keys(next).length === 0) {
+      launchWatchTimer.stop()
+      launchGuardTimer.stop()
+    }
     service.setError(appId, message)
     service.notify(message)
     service.refreshCatalogState()
@@ -2862,20 +3117,23 @@ Item {
     if (bindsCheckProc.running || service.pendingShortcut)
       return { ok: false, message: service.tr("service.shortcutCheckRunning") }
     service.pendingShortcut = { appId: appId, chord: chord }
-    bindsCheckProc.running = true
+    bindsCheckProc.start(["hyprctl", "binds", "-j"])
     bindsCheckTimeout.restart()
     return { ok: true, pending: true, shortcut: chord }
   }
 
   // A missing/failed `hyprctl binds` must not leave the capture UI stuck on
-  // "Checking" forever and block every later shortcut assignment.
+  // "Checking" forever and block every later shortcut assignment. The timer
+  // really terminates the helper (SIGTERM, then SIGKILL inside the component)
+  // and the late result is ignored because `pendingShortcut` is cleared.
   Timer {
     id: bindsCheckTimeout
     interval: 4000
     onTriggered: {
       var pending = service.pendingShortcut
-      if (!pending) return
       service.pendingShortcut = null
+      bindsCheckProc.cancel()
+      if (!pending) return
       service.shortcutRejected(pending.appId, service.tr("service.shortcutCheckTimeout"))
     }
   }
@@ -2912,12 +3170,24 @@ Item {
     service.shortcutAssigned(pending.appId, pending.chord)
   }
 
-  Process {
+  BoundedProcess {
     id: bindsCheckProc
-    command: ["hyprctl", "binds", "-j"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: service.finishShortcutCheck(String(text || ""))
+    producerBound: true
+    producerTimeoutSeconds: 3
+    timeoutMs: 3500
+    maxOutBytes: Bounds.LIMITS.hyprOutputBytes
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
+      bindsCheckTimeout.stop()
+      if (result.ok) {
+        service.finishShortcutCheck(result.out)
+        return
+      }
+      var pending = service.pendingShortcut
+      if (!pending) return
+      service.pendingShortcut = null
+      if (result.canceled) return
+      service.shortcutRejected(pending.appId, service.tr("service.shortcutCheckTimeout"))
     }
   }
 
@@ -3132,6 +3402,7 @@ Item {
     service.cancelSlide()
     autoHideTimer.stop()
     launchWatchTimer.stop()
+    launchGuardTimer.stop()
     focusRestoreTimer.stop()
     service.focusRestoreAddress = ""
     for (var launchingId in service.launching) service.disarmLaunch(launchingId)
@@ -3186,6 +3457,9 @@ Item {
     service.paletteWorkspace = ""
     service.palettePreviousFocus = ""
     service.refreshSystemDefaults()
+    service.readConfig()
+    service.readState()
+    service.readBinds()
     service.refreshMonitors()
     service.refreshClients()
     console.log("omarchy-dropdown: service started")
@@ -3363,14 +3637,28 @@ Item {
     if (!entry || entry.hidden) return
     service.clickCheckAppId = id
     service.clickCheckAddress = entry.address
-    cursorProc.running = true
+    cursorProc.start(["hyprctl", "-j", "cursorpos"])
   }
 
-  Process {
+  BoundedProcess {
     id: cursorProc
-    command: ["hyprctl", "-j", "cursorpos"]
-    stdout: StdioCollector {
-      onStreamFinished: service.handleClickPointer(String(text || ""))
+    producerBound: true
+    producerTimeoutSeconds: 2
+    timeoutMs: 3000
+    maxOutBytes: 4096
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      if (result.ok) {
+        service.handleClickPointer(result.out)
+        return
+      }
+      // A pointer query that never answers must not leave a stale click check
+      // armed and block the next one.
+      service.clickCheckAppId = ""
+      service.clickCheckAddress = ""
+      if (!result.canceled)
+        console.warn("omarchy-dropdown: cursor position query failed (" +
+          service.helperDetail(result) + ")")
     }
   }
 

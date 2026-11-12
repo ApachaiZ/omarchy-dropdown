@@ -15,6 +15,7 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 | `dropdown-state.json` | User or another local tool | Window adoption, previous workspace |
 | `~/.config/hypr/dropdown.lua` | User-writable Lua loaded by the compositor | Compositor code |
 | IPC arguments (`showApp`, `setShortcut`, …) | Any local process | App ids, chords |
+| Clipboard (PRIMARY and CLIPBOARD) | Any application on the session | Unbounded text insertion, huge payloads |
 
 ## Sinks and mitigations
 
@@ -53,6 +54,22 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   framing. State and config are treated as untrusted: managed special
   workspaces are rejected as destinations, and state adoption requires a
   non-empty window class equal to the live one.
+- **Clipboard paste**: the Manage search field never runs Qt's native paste.
+  A `Keys` handler on the focused `TextInput` (priority `BeforeItem`) accepts
+  every `StandardKey.Paste` gesture and a `MouseArea` accepting only
+  `Qt.MiddleButton` intercepts the PRIMARY selection. The read is
+  `wl-paste` under `timeout -k 1 2` piped through `head -c 65537`, with the
+  command and arguments passed as positional parameters to a constant bash
+  script. The consumer refuses any payload above 64 KiB, a 200-character
+  field cap bounds insertion, and a generation token invalidates results from
+  a superseded request. Nothing reads the clipboard on open, only on an
+  explicit paste. Covered by `tests/bounds.test.mjs` and
+  `tests/qml-bounds.test.mjs`.
+- **Helper processes**: every `Process` is wrapped in `BoundedProcess`
+  (per-stream caps, absolute deadline, SIGTERM→SIGKILL, failed-start
+  detection). Output larger than the cap is a hard failure, never a partial
+  parse. Config/state/agent/shell/binds files are read with
+  `timeout head -c` in argv form, so a huge or malicious file is refused.
 - **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
   the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
   `~/.local/state/omarchy/`, and the bar placement file. The installer also
@@ -81,6 +98,13 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 
 ## History
 
+- **0.8.1** — bounded paste and bounded helpers. The Manage search field
+  intercepts all keyboard paste gestures and middle-click PRIMARY; clipboard
+  reads are producer- and consumer-bounded (64 KiB, 2 s) with stale-request
+  cancellation. All external helpers gained deadlines, output caps,
+  SIGTERM→SIGKILL escalation and failed-start recovery; files are read through
+  bounded producers and queues/collections have explicit caps. Reported in
+  the marketplace review (`omacom/omarchy-plugin-marketplace#14610`).
 - **0.7.14** — audit hardening. `luaString` escapes batch separators
   (`;[]`) so a workspace name cannot inject a `hyprctl --batch` dispatch;
   generated bind commands shell-quote the desktop app id; config/state reject

@@ -3,6 +3,11 @@
 
 var SCHEMA_VERSION = 1
 
+// Upper bound on configured app entries. A config file can be user-writable by
+// another local tool; beyond this size the catalog, key maps and generated
+// binds would grow without bound. Extra entries are ignored with a warning.
+var MAX_CONFIG_APPS = 512
+
 // Keys proposed for the three optional system applications. They are only
 // reserved while the application itself is enabled.
 var SYSTEM_KEYS = { terminal: "t", agent: "i", files: "f" }
@@ -894,14 +899,20 @@ function validateConfig(raw) {
   }
 
   if (isPlainObject(parsed.apps)) {
+    var acceptedApps = 0
     for (var id in parsed.apps) {
       // JSON.parse can create an own "__proto__" key. Assigning
       // config.apps["__proto__"] would replace the map's prototype and make
       // every catalog row inherit the attacker's enabled/key fields.
       if (!Object.prototype.hasOwnProperty.call(parsed.apps, id)) continue
       if (id === "__proto__" || id === "constructor" || id === "prototype") continue
+      if (acceptedApps >= MAX_CONFIG_APPS) {
+        warnings.push("Too many app entries; entries beyond " + MAX_CONFIG_APPS + " were ignored.")
+        break
+      }
       var entry = parsed.apps[id]
       if (!isPlainObject(entry)) continue
+      acceptedApps++
       if (!config.apps[id]) config.apps[id] = {}
       var target = config.apps[id]
       if (typeof entry.enabled === "boolean") target.enabled = entry.enabled
@@ -1078,6 +1089,7 @@ if (typeof module !== "undefined") {
     shortcutKey: shortcutKey,
     commandValues: commandValues,
     DEFAULT_CONFIG: DEFAULT_CONFIG,
+    MAX_CONFIG_APPS: MAX_CONFIG_APPS,
     GEOMETRY_PRESETS: GEOMETRY_PRESETS,
     ANIMATION_MODES: ANIMATION_MODES,
     TABS_POSITIONS: TABS_POSITIONS,

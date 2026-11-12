@@ -190,6 +190,11 @@
   "notice.barFailedNoReason": "Échec du placement dans la barre.",
   "notice.barApplied": "Placement dans la barre appliqué.",
   "notice.reservedLabel": "réservé · %1",
+  "notice.clipboardTimeout": "La lecture du presse-papiers a expiré. Collez à nouveau.",
+  "notice.clipboardUnavailable": "L'outil de presse-papiers (wl-paste) n'est pas disponible.",
+  "notice.clipboardTooLarge": "Le contenu du presse-papiers est trop volumineux pour être collé.",
+  "notice.clipboardTooLong": "Le texte collé dépasse le filtre de %1 caractères.",
+  "notice.clipboardFailed": "Le presse-papiers n'a pas pu être lu.",
 
   "bar.help": "Déplacez le widget Dropdown entre les sections gauche, centre et droite de la barre Omarchy.",
   "bar.section": "Section",

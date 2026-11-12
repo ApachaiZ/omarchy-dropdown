@@ -13,6 +13,7 @@ import qs.Commons
 import qs.Commons as Commons
 import "Model.js" as Model
 import "js/Keymap.js" as Keymap
+import "js/Bounds.js" as Bounds
 import "components"
 
 Item {
@@ -349,6 +350,7 @@ Item {
     }
     allAppsOpen = false
     resetTransientModes()
+    overlay.cancelPaste()
     // closing must be set before opened: `visible: opened || closing` would
     // otherwise evaluate to false for one property change, unmapping the
     // layer surface and remapping it mid-fade (the close flicker).
@@ -467,7 +469,7 @@ Item {
     pendingBarTouched = false
     pendingBarSection = barSection
     pendingBarIndex = barIndex
-    barConfig.reload()
+    readBarConfig()
     view = "bar"
   }
 
@@ -514,9 +516,8 @@ Item {
     if (["left", "center", "right"].indexOf(pendingBarSection) < 0) return
     barMoveDirty = false
     barMoveRunning = true
-    barMoveProc.command = ["omarchy", "bar", "move", "apach.dropdown",
-      "--section", pendingBarSection, "--index", String(Math.max(0, pendingBarIndex))]
-    barMoveProc.running = true
+    barMoveProc.start(["omarchy", "bar", "move", "apach.dropdown",
+      "--section", pendingBarSection, "--index", String(Math.max(0, pendingBarIndex))])
   }
 
   Timer {
@@ -525,16 +526,20 @@ Item {
     onTriggered: overlay.applyBarPlacementNow()
   }
 
-  Process {
+  BoundedProcess {
     id: barMoveProc
-    stderr: StdioCollector { id: barMoveError; waitForEnd: true }
-    onExited: function(code) {
+    producerBound: false
+    timeoutMs: 6000
+    maxOutBytes: 4096
+    maxErrBytes: Bounds.LIMITS.helperErrBytes
+    onFinished: function(result) {
       overlay.barMoveRunning = false
-      barConfig.reload()
-      if (code !== 0) {
+      overlay.readBarConfig()
+      if (!result.ok) {
         overlay.pendingBarTouched = false
-        var reason = String(barMoveError.text || "").trim().split("\n")[0]
-        overlay.say(reason ? overlay.tr("notice.barFailed", [reason]) : overlay.tr("notice.barFailedNoReason"), true)
+        var reason = String(result.err || "").trim().split("\n")[0]
+        overlay.say(reason ? overlay.tr("notice.barFailed", [reason])
+          : overlay.tr("notice.barFailedNoReason"), true)
         return
       }
       if (overlay.barMoveDirty) {
@@ -547,14 +552,47 @@ Item {
     }
   }
 
+  // FileView is only a change notification; shell.json is read through a
+  // bounded helper so a huge or malicious file is never loaded whole.
   FileView {
     id: barConfig
     path: overlay.shellConfigPath
     watchChanges: true
+    preload: false
     printErrors: false
-    onLoaded: overlay.applyBarPlacement(text())
-    onFileChanged: reload()
+    onFileChanged: overlay.readBarConfig()
   }
+
+  BoundedProcess {
+    id: barConfigReadProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: Bounds.LIMITS.shellConfigBytes
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      var again = overlay.barConfigReadAgain
+      overlay.barConfigReadAgain = false
+      if (result.overflow) {
+        console.warn("omarchy-dropdown: shell.json exceeds " +
+          Bounds.LIMITS.shellConfigBytes + " bytes; keeping the current bar placement")
+      } else if (result.ok) {
+        overlay.applyBarPlacement(result.out)
+      }
+      if (again && !barConfigReadProc.running) overlay.readBarConfig()
+    }
+  }
+
+  property bool barConfigReadAgain: false
+
+  function readBarConfig() {
+    if (barConfigReadProc.running) {
+      overlay.barConfigReadAgain = true
+      return
+    }
+    barConfigReadProc.start(Bounds.fileReadCommand(overlay.shellConfigPath, Bounds.LIMITS.shellConfigBytes))
+  }
+
+  Component.onCompleted: overlay.readBarConfig()
 
   function commandKey(name) {
     return service ? service.commandKey(name) : String(Model.DEFAULT_COMMANDS[name] || "")
@@ -688,6 +726,7 @@ Item {
     closing = false
     allAppsOpen = false
     resetTransientModes()
+    overlay.cancelPaste()
     animY = 0
     animX = 0
     animOpacity = 1
@@ -717,6 +756,58 @@ Item {
   function focusSearch() {
     if (!opened) return
     Qt.callLater(function() { if (overlay.opened && overlay.view === "manage") searchInput.forceActiveFocus() })
+  }
+
+  // ---- Bounded clipboard paste ---------------------------------------------
+  //
+  // Qt's native paste (Ctrl+V, Shift+Insert, middle-click PRIMARY) is
+  // unbounded. The search field intercepts every paste gesture before
+  // QQuickTextInput sees it and reads the clipboard through a producer- and
+  // receiver-bounded helper. Only an explicit paste starts a read: opening the
+  // palette never touches the clipboard.
+
+  property int pasteGeneration: 0
+
+  BoundedProcess {
+    id: pasteProc
+    producerBound: true
+    producerTimeoutSeconds: 2
+    timeoutMs: 3000
+    maxOutBytes: Bounds.LIMITS.clipboardBytes
+    maxErrBytes: 4096
+    onFinished: function(result) {
+      // A result from an older request (new paste, focus loss, close) must
+      // never be inserted.
+      if (!Bounds.isCurrentGeneration(result.tag, overlay.pasteGeneration)) return
+      if (result.canceled) return
+      if (result.timedOut) { overlay.say(strings.t("notice.clipboardTimeout")); return }
+      if (result.startFailed || result.code === 127) {
+        overlay.say(strings.t("notice.clipboardUnavailable"))
+        return
+      }
+      if (result.overflow) { overlay.say(strings.t("notice.clipboardTooLarge")); return }
+      if (!result.ok) { overlay.say(strings.t("notice.clipboardFailed")); return }
+      var verdict = Bounds.insertionVerdict(result.out, searchInput.text.length,
+        Bounds.LIMITS.searchChars, Bounds.LIMITS.clipboardBytes)
+      if (!verdict.ok) {
+        if (verdict.reason === "tooLarge") overlay.say(strings.t("notice.clipboardTooLarge"))
+        else overlay.say(strings.t("notice.clipboardTooLong").arg(Bounds.LIMITS.searchChars))
+        return
+      }
+      if (verdict.text === "") return
+      searchInput.insert(searchInput.cursorPosition, verdict.text)
+    }
+  }
+
+  function pasteFromClipboard(primary) {
+    overlay.pasteGeneration++
+    var tag = overlay.pasteGeneration
+    pasteProc.start(Bounds.clipboardCommand(primary === true), tag)
+  }
+
+  function cancelPaste() {
+    overlay.pasteGeneration++
+    pasteProc.cancel()
   }
 
   // Note: do not dismiss on the Hyprland `focusedmon` event. Hyprland changes
@@ -1635,7 +1726,7 @@ Item {
       pendingBarIndex = barIndex
       pendingBarTouched = false
       barMoveDirty = false
-      barConfig.reload()
+      readBarConfig()
       say(strings.t("notice.placementReloaded"))
     }
   }
@@ -2439,8 +2530,43 @@ Item {
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
                 clip: true
+                // Defense in depth: no unbounded paste can be inserted even if
+                // a path below is bypassed.
+                maximumLength: Bounds.LIMITS.searchChars
                 onTextChanged: if (text !== overlay.search) overlay.search = text
-                onActiveFocusChanged: if (activeFocus) overlay.searchFocused = true
+                onActiveFocusChanged: {
+                  if (activeFocus) overlay.searchFocused = true
+                  else overlay.cancelPaste()
+                }
+
+                // Intercept every keyboard paste gesture before QQuickTextInput
+                // runs its native, unbounded paste. BeforeItem is explicit so a
+                // future default change cannot silently restore native paste.
+                Keys.priority: Keys.BeforeItem
+                Keys.onPressed: function(event) {
+                  var pasteGesture = event.matches(StandardKey.Paste) ||
+                    (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) ||
+                    (event.key === Qt.Key_Insert && (event.modifiers & Qt.ShiftModifier))
+                  if (!pasteGesture) return
+                  event.accepted = true
+                  overlay.pasteFromClipboard(false)
+                }
+              }
+
+              // PRIMARY selection pastes on middle click inside
+              // QQuickTextInput::mouseReleaseEvent and cannot be intercepted
+              // with Keys. This area accepts only the middle button; left
+              // clicks pass through to the TextInput for placement and cursor
+              // movement.
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.MiddleButton
+                onPressed: function(mouse) {
+                  mouse.accepted = true
+                  overlay.searchFocused = true
+                  searchInput.forceActiveFocus()
+                  overlay.pasteFromClipboard(true)
+                }
               }
 
               Text {

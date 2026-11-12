@@ -1,6 +1,6 @@
 # Omarchy Dropdown
 
-[![Latest release](https://img.shields.io/badge/release-v0.8.0-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
+[![Latest release](https://img.shields.io/badge/release-v0.8.1-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
 [![Quay integration](https://img.shields.io/badge/Quay-1.1.1%2B-4c8bf5)](https://github.com/ApachaiZ/omarchy-quay)
 ![Omarchy Dropdown — Your apps. One shortcut.](preview.png)
 

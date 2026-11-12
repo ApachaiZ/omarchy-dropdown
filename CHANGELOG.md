@@ -4,6 +4,37 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.8.1 — 2026-11-13
+
+### Security
+
+- Manage search paste is bounded before Qt sees it. Every keyboard paste
+  gesture (Ctrl+V, Shift+Insert, Ctrl+Shift+Insert) is intercepted on the
+  `TextInput` and middle-click PRIMARY through a dedicated `MouseArea`; the
+  field no longer runs QQuickTextInput's unbounded native paste. `wl-paste`
+  runs under a 2 s `timeout` with `head -c 65537`, the consumer refuses any
+  payload above 64 KiB, and a generation token cancels stale requests on a new
+  paste, focus loss or close. The filter field is capped at 200 characters and
+  refusals are shown as notices.
+
+### Fixed
+
+- Every external helper (`hyprctl`, `xdg-terminal-exec`, `xdg-mime`,
+  `wl-paste`, `omarchy bar`, file reads) now runs through a shared
+  `BoundedProcess`: per-stream byte caps, an absolute deadline, SIGTERM then
+  SIGKILL, failed-start detection and a single terminal result. A missing or
+  hung binary can no longer leave callbacks, queues or the shortcut check
+  blocked.
+- Dispatch, client/monitor callback and launch-preemption queues have explicit
+  caps; stale callbacks are dropped with a warning, and a saturated launch
+  queue launches without preemption instead of losing the launch.
+- `bindsCheckTimeout` terminates `hyprctl binds` and a launch watchdog expires
+  launches even when `hyprctl clients` fails.
+- Config, state, agent, shell.json and generated-binds files are read through
+  bounded producers (1 MiB, 4 MiB, 64 KiB, 1 MiB, 1 MiB); an oversized file is
+  refused rather than partially parsed, and the previous configuration is
+  kept. Config apps, state entries and the desktop-entry catalog are capped.
+
 ## 0.8.0 — 2026-11-10
 
 ### Added

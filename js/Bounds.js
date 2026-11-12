@@ -1,0 +1,168 @@
+// Pure limits and helpers for bounded helpers, clipboard reads and queues.
+// No QML or shell access, so every function here is covered by
+// tests/bounds.test.mjs. The QML side (components/BoundedProcess.qml) applies
+// these values; keeping them here makes the numeric contract testable.
+
+// Producer caps are always one byte above the consumer cap so a payload that
+// exactly fits is accepted and anything larger is detectable, never parsed as
+// if it were complete.
+var LIMITS = {
+  clipboardBytes: 65536,
+  searchChars: 200,
+  configBytes: 1048576,
+  stateBytes: 4194304,
+  shellConfigBytes: 1048576,
+  agentBytes: 65536,
+  bindsBytes: 1048576,
+  hyprOutputBytes: 4194304,
+  helperOutBytes: 65536,
+  helperErrBytes: 8192,
+  queueItems: 64,
+  launchArmItems: 32,
+  callbackMaxAgeMs: 30000,
+  configApps: 512,
+  stateEntries: 512,
+  catalogApps: 4096
+}
+
+// UTF-8 byte length without TextEncoder: QML's JS engine has no TextEncoder,
+// and a raw `.length` would undercount every non-ASCII character.
+function utf8ByteLength(text) {
+  var value = String(text === undefined || text === null ? "" : text)
+  var bytes = 0
+  for (var i = 0; i < value.length; i++) {
+    var code = value.charCodeAt(i)
+    if (code < 0x80) {
+      bytes += 1
+    } else if (code < 0x800) {
+      bytes += 2
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      var next = i + 1 < value.length ? value.charCodeAt(i + 1) : 0
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4
+        i++
+      } else {
+        bytes += 3
+      }
+    } else {
+      bytes += 3
+    }
+  }
+  return bytes
+}
+
+// Wrap an argv vector so the producer itself is bounded: `timeout` enforces an
+// absolute deadline and `head -c` stops the stream one byte past the consumer
+// cap. The shell script is a constant; the command and its arguments travel as
+// positional parameters, so no caller value can become shell syntax. The exit
+// status is the producer's (124 on timeout, 141 on SIGPIPE, 127 when the tool
+// is missing), not `head`'s.
+function producerCommand(argv, maxBytes, timeoutSeconds) {
+  var list = []
+  for (var i = 0; i < (argv || []).length; i++) list.push(String(argv[i]))
+  if (list.length === 0) return []
+  var cap = Math.max(1, Math.floor(Number(maxBytes) || 0)) + 1
+  var seconds = Math.max(1, Math.ceil(Number(timeoutSeconds) || 2))
+  return ["bash", "-c",
+    "timeout -k 1 " + seconds + ' "$@" | head -c ' + cap + "; exit ${PIPESTATUS[0]}",
+    "bash"].concat(list)
+}
+
+// Bounded file read without a shell: `head` opens the path directly (argv
+// element, never interpolated), `timeout` bounds the helper. The consumer cap
+// is one byte below the produced cap.
+function fileReadCommand(path, maxBytes) {
+  var cap = Math.max(1, Math.floor(Number(maxBytes) || 0)) + 1
+  return ["timeout", "-k", "1", "2", "head", "-c", String(cap), String(path || "")]
+}
+
+function clipboardCommand(primary) {
+  var argv = ["wl-paste", "--no-newline"]
+  if (primary === true) argv.push("--primary")
+  return producerCommand(argv, LIMITS.clipboardBytes, 2)
+}
+
+// Bounded queue push: drop the oldest entries when the cap is reached so no
+// producer can grow a queue without bound. `dropped` is reported so callers
+// can warn once per overflow.
+function pushBounded(queue, item, limit) {
+  var list = (queue || []).slice()
+  list.push(item)
+  var max = Math.max(1, Math.floor(Number(limit) || 1))
+  var dropped = 0
+  while (list.length > max) {
+    list.shift()
+    dropped++
+  }
+  return { queue: list, dropped: dropped }
+}
+
+// Callbacks carry their enqueue time. A helper that never finishes (or a
+// failed start) cannot leave a callback pending forever: drainers drop entries
+// older than maxAgeMs and report how many were stale.
+function pushCallback(queue, callback, limit, now) {
+  if (typeof callback !== "function") return { queue: (queue || []).slice(), dropped: 0 }
+  var at = typeof now === "number" ? now : Date.now()
+  return pushBounded(queue, { fn: callback, at: at }, limit)
+}
+
+function takeFreshCallbacks(queue, now, maxAgeMs) {
+  var list = queue || []
+  var current = typeof now === "number" ? now : Date.now()
+  var age = Math.max(0, Number(maxAgeMs) || 0)
+  var callbacks = []
+  var stale = 0
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i]
+    var fn = typeof item === "function" ? item : (item ? item.fn : null)
+    if (typeof fn !== "function") continue
+    var at = typeof item === "function" ? current : Number(item.at)
+    if (isFinite(at) && age > 0 && current - at > age) {
+      stale++
+      continue
+    }
+    callbacks.push(fn)
+  }
+  return { callbacks: callbacks, stale: stale }
+}
+
+// Stale-result guard for async reads: a result is usable only when its tag is
+// the generation that is still current. A new request, focus loss or close
+// increments the generation, so a late result is discarded.
+function isCurrentGeneration(tag, current) {
+  if (tag === null || tag === undefined) return false
+  return tag === current
+}
+
+// A single-line filter never receives embedded newlines or tabs from a paste.
+function singleLine(text) {
+  return String(text === undefined || text === null ? "" : text).replace(/[\r\n\t]+/g, " ")
+}
+
+// Accept only text that fits both the byte contract and the field's remaining
+// characters. The caller refuses (with a notice) instead of truncating
+// silently.
+function insertionVerdict(text, currentLength, maxChars, maxBytes) {
+  var value = singleLine(text)
+  if (utf8ByteLength(value) > Math.max(0, Number(maxBytes) || 0))
+    return { ok: false, reason: "tooLarge" }
+  var room = Math.max(0, Number(maxChars) || 0) - Math.max(0, Number(currentLength) || 0)
+  if (value.length > room) return { ok: false, reason: "tooLong" }
+  return { ok: true, text: value }
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    LIMITS: LIMITS,
+    utf8ByteLength: utf8ByteLength,
+    producerCommand: producerCommand,
+    fileReadCommand: fileReadCommand,
+    clipboardCommand: clipboardCommand,
+    pushBounded: pushBounded,
+    pushCallback: pushCallback,
+    takeFreshCallbacks: takeFreshCallbacks,
+    isCurrentGeneration: isCurrentGeneration,
+    singleLine: singleLine,
+    insertionVerdict: insertionVerdict
+  }
+}

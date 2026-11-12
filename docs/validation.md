@@ -12,15 +12,22 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 71/71 pass |
+| `node --test tests/*.test.mjs` | 100/100 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
+| `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
 | Manifest entry points exist | pass |
 | Example config validates | pass |
 | No unquoted shell interpolation; Lua/batch values are escaped (`luaString`, `shellQuote`) | pass |
 | Geometry for top/bottom/left/right, transforms, clamps | pass |
 | Webapp class derivation from real Chromium classes | pass |
 | Key collision / reserved commands | pass |
+| No `StdioCollector` and no raw `Process` remains; every helper declares a deadline and caps | pass (static test) |
+| `FileView` is notification/write only (`preload: false`, no `text()`/`data()`) | pass (static test) |
+| Manage search intercepts `StandardKey.Paste`, caps `maximumLength`, middle-click area | pass (static test) |
+| Producer bound: 1 MiB fake `wl-paste` yields exactly 65537 bytes and a non-zero status; 100-byte payload passes; hang yields 124 within ~2 s; failure/missing tool propagate 3/127 | pass (`tests/bounds.test.mjs`) |
+| UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts | pass (unit tests) |
+| `en.json`/`fr.json` strict key and placeholder parity | pass |
 
 ## Graphical, on the real session
 
@@ -137,6 +144,49 @@ Environment where the graphical checks were run:
 | Geometry/tab-position settings keep the palette open | works |
 | Bar widget remains visible after moving it on a portrait output | works in the left section; the centre/right sections of that bar can render off-window |
 
+## Bounds and clipboard (0.8.1)
+
+All external helpers run through `components/BoundedProcess.qml`. Numeric
+limits live in `js/Bounds.js` and are covered by `tests/bounds.test.mjs`.
+
+| Resource | Cap |
+| --- | --- |
+| Clipboard payload (consumer) | 65536 bytes; producer emits at most 65537 |
+| Clipboard deadline | 2 s producer timeout (`timeout -k 1 2`), 3 s QML deadline |
+| Search filter | 200 characters |
+| `dropdown.json` | 1 MiB |
+| `dropdown-state.json` | 4 MiB |
+| `shell.json` | 1 MiB |
+| Default agent file | 64 KiB |
+| Generated binds file | 1 MiB |
+| `hyprctl clients/monitors/binds` output | 4 MiB, truncated output = failure |
+| Helper stderr | 8 KiB |
+| Dispatch queue | 64 expressions (oldest dropped with warning) |
+| Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
+| Launch preemption queue | 32 entries; overflow launches without preemption |
+| Config apps / state entries | 512 each |
+| Desktop-entry catalog | 4096 entries |
+
+Clipboard scenarios exercised by unit tests through the exact producer
+command, with a fake `wl-paste` first in `PATH` (the real clipboard is never
+touched):
+
+| Scenario | Result |
+| --- | --- |
+| Producer writes 1 MiB | exactly 65537 bytes, non-zero status, receiver refuses (> 64 KiB) |
+| Producer writes 100 bytes | exit 0, payload accepted |
+| Producer hangs | `timeout` exits 124 in ~2 s, empty output |
+| Producer fails | exit status propagated (3), empty output |
+| Tool missing | exit 127, start failure surfaced |
+| New paste / focus loss / close during a read | generation token invalidates the result; nothing is inserted |
+| Pasted text above the filter cap | refused with a notice, field unchanged |
+
+**Not exercised graphically:** the real keyboard paste routing under Wayland
+(Ctrl+V, Shift+Insert) and the middle-click PRIMARY interception. The code
+path is covered by static invariants (a `Keys` handler on the focused
+`TextInput` with `Keys.BeforeItem`, and a `MouseArea` accepting only
+`Qt.MiddleButton`); the physical gestures were not driven in this session.
+
 ## Not exercised, and why
 
 - **The physical `Super + Alt + ;` chord.** `wtype` cannot inject a usable
@@ -185,6 +235,15 @@ Environment where the graphical checks were run:
 - A plugin code hot-reload restores parked windows and re-adopts visible ones.
   The palette flag is reset in 0.6.0, but QML component caches can still serve
   an older file; restart `omarchy-shell` after changing QML while developing.
+- `FileView` is used with `preload: false` and its content API is never
+  called; only its change notification and atomic write path remain. Its
+  internal `watchChanges` behaviour is not bounded by this plugin: a file
+  change can still make Qt's watcher stat/reload metadata, but no file content
+  is read into QML by `FileView`. All content reads go through `head -c`.
+- Qt 6.12 `TextInput` has no `dragEnter`/`dropEvent` and does not set
+  `ItemAcceptsDrops`, so dragging text onto the search field inserts nothing.
+  No drop handler was added because there is no native insertion path to
+  bound.
 - The real plugin-disable path was exercised through the shared `cleanup` IPC
   and `pluginStillEnabled()` logic; a full disable was not run on the capture
   session because it would unpark the author's windows.

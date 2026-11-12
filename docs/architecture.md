@@ -69,9 +69,14 @@ state file ──────────► recovery ─► re-adopt parked win
 - **Context capture.** `capturePaletteContext` reads the live Hyprland monitor
   and workspace at open time; it does not use a cached monitor list, so a fixed
   screen follows that screen's current workspace.
-- **Dispatcher queue.** All `hyprctl dispatch` calls go through one Process and
-  a FIFO queue; a failed dispatch is recorded in `hyprError` and exposed in
-  `status`/`doctor`.
+- **Dispatcher queue.** All `hyprctl dispatch` calls go through one bounded
+  helper and a capped FIFO queue (64 entries, oldest dropped with a warning);
+  a failed, timed-out or oversized dispatch is recorded in `hyprError` and
+  exposed in `status`/`doctor`.
+- **External helpers.** Every `Process` is a `BoundedProcess`: per-stream byte
+  caps, an absolute deadline, SIGTERM then SIGKILL, failed-start detection and
+  one terminal result. JSON helpers are producer-bounded (`timeout … | head
+  -c`); a truncated payload is a failure, never a partial parse.
 
 ## Config writes
 
@@ -80,11 +85,14 @@ Only the service writes `~/.config/omarchy/dropdown.json`.
 1. Every mutation clones the config, validates the result and marks it dirty.
 2. `saveConfigNow` serializes with `ConfigFile.encode`, records the exact text
    as `lastConfigWrite`, then writes atomically.
-3. `FileView` watches the file. A change whose text equals `lastConfigWrite` is
-   our own write and is ignored.
+3. `FileView` only notifies changes (`preload: false`) and performs atomic
+   writes; it never supplies file content. The service re-reads through
+   `timeout head -c` (1 MiB cap). A change whose text equals `lastConfigWrite`
+   is our own write and is ignored.
 4. A real external change is backed up (`dropdown.json.bak-YYYYMMDD-HHMMSS`,
    five kept), then adopted. Invalid JSON is backed up but never adopted:
-   settings stay in memory and the file is left for the user to fix.
+   settings stay in memory and the file is left for the user to fix. A file
+   above the cap is refused without touching the previous configuration.
 5. If local edits are pending, they win: the file is backed up and rewritten.
 
 ## Direct shortcuts
