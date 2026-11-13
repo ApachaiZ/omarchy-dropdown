@@ -113,6 +113,18 @@ test("clipboard start failure is reported and restoreAll invalidates the check",
   assert.match(service, /service\.cancelShortcutRequest\(\)\s*\n\s*service\.currentAppId/)
 })
 
+test("large-output and dispatch helpers are producer-bounded on both streams", () => {
+  const ids = ["clientsProc", "monitorsProc", "bindsVerifyProc", "bindsCheckProc",
+    "dispatchProc", "batchProc", "launchArmProc", "pasteProc", "barMoveProc"]
+  const blocks = findBlocks(allQml, "BoundedProcess {").filter((block) =>
+    ids.some((id) => new RegExp("id:\\s*" + id + "\\b").test(block)))
+  assert.equal(blocks.length, ids.length)
+  for (const block of blocks) {
+    assert.match(block, /producerBound:\s*true/)
+    assert.match(block, /producerTimeoutSeconds:\s*\d+/)
+  }
+})
+
 test("no helper is started through a bare running assignment", () => {
   const ids = [
     "clientsProc", "monitorsProc", "dispatchProc", "batchProc", "launchArmProc",

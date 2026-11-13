@@ -1392,7 +1392,8 @@ Item {
 
   BoundedProcess {
     id: dispatchProc
-    producerBound: false
+    producerBound: true
+    producerTimeoutSeconds: 3
     timeoutMs: 4000
     maxOutBytes: 4096
     maxErrBytes: Bounds.LIMITS.helperErrBytes
@@ -1732,7 +1733,8 @@ Item {
 
   BoundedProcess {
     id: batchProc
-    producerBound: false
+    producerBound: true
+    producerTimeoutSeconds: 3
     timeoutMs: 4000
     maxOutBytes: 4096
     maxErrBytes: Bounds.LIMITS.helperErrBytes
@@ -2383,7 +2385,8 @@ Item {
 
   BoundedProcess {
     id: launchArmProc
-    producerBound: false
+    producerBound: true
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 4096
     maxErrBytes: Bounds.LIMITS.helperErrBytes

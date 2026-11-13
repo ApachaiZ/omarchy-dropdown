@@ -528,7 +528,8 @@ Item {
 
   BoundedProcess {
     id: barMoveProc
-    producerBound: false
+    producerBound: true
+    producerTimeoutSeconds: 5
     timeoutMs: 6000
     maxOutBytes: 4096
     maxErrBytes: Bounds.LIMITS.helperErrBytes

@@ -162,6 +162,9 @@ Item {
     if (!_overflow && Bounds.utf8ByteLength(errText) > maxErrBytes) _overflow = true
     var exitCode = Number(code)
     if (!isFinite(exitCode)) exitCode = -1
+    // The producer wrapper's `timeout` exits 124. Surface that as the same
+    // timeout flag the QML deadline sets, for callers that branch on it.
+    if (producerBound && exitCode === 124 && !_startFailed) _timedOut = true
     var result = {
       ok: !_overflow && !_timedOut && !_startFailed && !_canceled && exitCode === 0,
       code: _startFailed ? -1 : exitCode,

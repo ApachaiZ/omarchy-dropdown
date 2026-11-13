@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 121/121 pass |
+| `node --test tests/*.test.mjs` | 122/122 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -171,7 +171,7 @@ covered by `tests/bounds.test.mjs`.
 | `hyprctl clients/monitors/binds` output | 4 MiB, truncated output = failure |
 | stderr, file/clipboard/status helpers | 4 KiB, producer-capped when `producerBound` (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
 | stderr, file probes | 1 KiB (`configStatProc`, `stateStatProc`) |
-| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
+| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB, producer-capped (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
 | BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
 | Dispatch queue | 64 expressions (oldest dropped with warning) |
 | Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
@@ -272,14 +272,16 @@ path is covered by static invariants (a `Keys` handler on the focused
   internal `watchChanges` behaviour is not bounded by this plugin: a file
   change can still make Qt's watcher stat/reload metadata, but no file content
   is read into QML by `FileView`. All content reads go through `head -c`.
-- When `producerBound` is true, both streams stop at the producer (`head -c`
-  on stdout, process-substitution `head -c` on stderr) and the final UTF-8
-  length is rechecked before any parse. When `producerBound` is false, the
-  collector has `waitForEnd: false`, so `dataChanged` fires per chunk and the
-  cap is enforced by `Bounds.chunkOverflow` on every chunk; at most the
-  in-flight chunk can cross the cap. `waitForEnd: true` was removed because
-  Quickshell 0.3.2 only emitted `dataChanged` at stream end, which let memory
-  grow to the full producer output before the cap could act.
+- Producer-bound helpers (clipboard, `hyprctl` JSON/dispatch/batch/launch,
+  bar move, terminal/file/cursor probes) cap stdout and stderr at the producer
+  with `head -c`; the final UTF-8 length is rechecked before any parse. The
+  remaining non-producer-bound helpers are file reads already wrapped in
+  `timeout head -c` and tiny stat probes. Every collector uses
+  `waitForEnd: false`, so `dataChanged` fires per chunk and
+  `Bounds.chunkOverflow` stops the helper at cap plus at most the in-flight
+  chunk. `waitForEnd: true` was removed because Quickshell 0.3.2 only emitted
+  `dataChanged` at stream end, which let memory grow to the full producer
+  output before the cap could act.
 - Qt 6.12 `TextInput` has no `dragEnter`/`dropEvent` and does not set
   `ItemAcceptsDrops`, so dragging text onto the search field inserts nothing.
   No drop handler was added because there is no native insertion path to
