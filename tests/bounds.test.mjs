@@ -632,6 +632,95 @@ test("after a failed adoption backup, an automatic save writes nothing", () => {
   }
 })
 
+test("a refused-write completion does not replay a deferred save", () => {
+  // The refused-write follow-up already wrote the current configuration, so a
+  // save requested during its copy must not trigger a second backup/write.
+  assert.equal(Bounds.backupReplayPending("refused-write"), false)
+  // Adoption and dirty follow-ups do not write user configuration, so a
+  // deferred explicit save still runs after them.
+  assert.equal(Bounds.backupReplayPending("adoption"), true)
+  assert.equal(Bounds.backupReplayPending("dirty"), true)
+  assert.equal(Bounds.backupReplayPending(""), true)
+})
+
+test("two refused saves during a slow backup write once and keep the original backup", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-r3-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nsleep 0.25\n/bin/cp \"$@\"\n")
+    chmodSync(join(bin, "cp"), 0o755)
+    const source = join(dir, "dropdown.json")
+    writeFileSync(source, "ORIGINAL")
+    const state = { inFlight: false, pending: false, writes: 0, backups: [] }
+    let done
+    const finished = new Promise((resolve) => { done = resolve })
+    function runCopy(target) {
+      const command = backupCommand(source, target)
+      const child = spawn(command[0], command.slice(1), {
+        env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+        stdio: "ignore"
+      })
+      state.backups.push(target)
+      child.on("close", (status) => {
+        state.inFlight = false
+        if (status === 0) {
+          // The refused-write follow-up writes the current in-memory config,
+          // which already includes every save requested during the copy.
+          writeFileSync(source, "REWRITTEN")
+          state.writes++
+          if (!Bounds.backupReplayPending("refused-write")) state.pending = false
+        }
+        if (state.pending) startRefusedBackup()
+        else done()
+      })
+    }
+    function startRefusedBackup() {
+      if (state.inFlight) { state.pending = true; return }
+      state.pending = false
+      state.inFlight = true
+      runCopy(ConfigFile.backupName(source, new Date()))
+    }
+    startRefusedBackup() // S1
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    startRefusedBackup() // S2 during the slow copy
+    startRefusedBackup() // S3 during the slow copy
+    assert.equal(state.pending, true)
+    await finished
+    // Give a buggy replay a chance to start before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    assert.equal(state.writes, 1, "only one write")
+    assert.equal(state.backups.length, 1, "only one backup")
+    assert.equal(readFileSync(state.backups[0], "utf8"), "ORIGINAL",
+      "the backup must be the pre-write content")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("two backups in the same millisecond get distinct names and files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-names-"))
+  try {
+    const source = join(dir, "dropdown.json")
+    writeFileSync(source, "ORIGINAL")
+    const date = new Date(2026, 0, 2, 3, 4, 5, 6)
+    const first = ConfigFile.backupName(source, date)
+    const second = ConfigFile.backupName(source, date)
+    assert.notEqual(first, second)
+    for (const [target, content] of [[first, "OLD"], [second, "NEW"]]) {
+      const command = backupCommand(source, target)
+      const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+      assert.equal(result.status, 0)
+      writeFileSync(target, content) // overwrite to prove they are distinct files
+    }
+    assert.equal(readFileSync(first, "utf8"), "OLD")
+    assert.equal(readFileSync(second, "utf8"), "NEW")
+    assert.notEqual(first, second)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("enqueueBatch refuses the newest item when full instead of dropping one", () => {
   let queue = []
   for (let i = 0; i < 8; i++) {

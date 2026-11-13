@@ -104,8 +104,9 @@ Only the service writes `~/.config/omarchy/dropdown.json`.
    writes; it never supplies file content. The service re-reads through
    `timeout head -c` (1 MiB cap). A change whose text equals `lastConfigWrite`
    is our own write and is ignored.
-4. A real external change is backed up (`dropdown.json.bak-YYYYMMDD-HHMMSS`,
-   five kept), then adopted. The backup is a bounded, awaited `cp`: the
+4. A real external change is backed up (`dropdown.json.bak-YYYYMMDD-HHMMSSmmm-N`,
+   unique even when two copies start in the same second; five kept), then
+   adopted. The backup is a bounded, awaited `cp`: the
    adoption (or the rewrite of local edits) runs only from its success
    handler, and a failed copy notifies and leaves the file and the in-memory
    configuration untouched. Invalid JSON is backed up but never adopted:

@@ -151,8 +151,11 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   Every config backup — external-edit adoption, local-edit rewrite and
   refused-file replacement — is a bounded, awaited `cp`; the write or adoption
   happens only after it succeeds. A failed adoption backup restores the
-  refusal barrier so no automatic save can overwrite the external file, and a
-  save requested during another copy is retained and run afterwards. Busy
+  refusal barrier so no automatic save can overwrite the external file; a
+  save requested during another copy is retained, but not replayed after a
+  refused-write completion that already included it. Backup names carry
+  milliseconds and a per-process sequence so rapid copies never overwrite
+  each other. Busy
   reveal batches are queued in a bounded FIFO and run through the bounded
   wrapper instead of a detached fallback (the launch-preemption park remains
   the one deliberate, `timeout -k 1 3`-bounded exception); every batch settles

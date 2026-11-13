@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 142/142 pass |
+| `node --test tests/*.test.mjs` | 146/146 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -34,6 +34,7 @@ Environment where the graphical checks were run:
 | Bounded backup prune keeps the five most recent files and leaves the config untouched | pass (`tests/bounds.test.mjs`) |
 | Busy reveal batches: batches arriving during a slow `hyprctl` run are queued, executed in order, and each callback fires once; a saturated queue settles the rejected callback and logs. The busy-path fallback is bounded; the only detached `hyprctl --batch` is the launch-preemption park, explicitly bounded with `timeout -k 1 3` | pass (`tests/bounds.test.mjs` + static invariants) |
 | Failed adoption backup: the refusal barrier is restored, so a later automatic save is blocked (no write without a successful backup); an explicit save retries the backup | pass (unit policy + static call-graph invariants) |
+| Two refused saves during a slow backup: one write, one backup, and the backup holds the pre-write content; same-millisecond backup names are distinct files | pass (`tests/bounds.test.mjs`) |
 | UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts, state/catalog caps | pass (unit tests) |
 | `en.json`/`fr.json` strict key and placeholder parity | pass |
 

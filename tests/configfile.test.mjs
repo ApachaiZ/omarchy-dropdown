@@ -17,9 +17,14 @@ test("isOwnWrite ignores the service's own save", () => {
   assert.equal(ConfigFile.isOwnWrite("", ""), true)
 })
 
-test("backup names are stable and timestamped", () => {
-  const date = new Date(2026, 0, 2, 3, 4, 5)
-  assert.equal(ConfigFile.backupName("/tmp/dropdown.json", date), "/tmp/dropdown.json.bak-20260102-030405")
+test("backup names carry milliseconds and a unique sequence", () => {
+  const date = new Date(2026, 0, 2, 3, 4, 5, 6)
+  const first = ConfigFile.backupName("/tmp/dropdown.json", date)
+  const second = ConfigFile.backupName("/tmp/dropdown.json", date)
+  // Two backups taken in the same second/millisecond must never share a name.
+  assert.match(first, /^\/tmp\/dropdown\.json\.bak-20260102-030405006-\d+$/)
+  assert.match(second, /^\/tmp\/dropdown\.json\.bak-20260102-030405006-\d+$/)
+  assert.notEqual(first, second)
   assert.equal(ConfigFile.backupName("", date), "")
 })
 

@@ -190,6 +190,17 @@ function configSaveAction(refused, explicit) {
   return "write"
 }
 
+// Whether a deferred save requested during a backup must still be replayed
+// after that backup's follow-up. A `refused-write` follow-up writes the
+// current in-memory configuration, which already includes every save request
+// made while its copy was running: replaying it would copy the rewritten file
+// over the original backup and write a second time. `adoption` and `dirty`
+// follow-ups do not write the user configuration, so a deferred explicit save
+// still needs its own bounded backup and write.
+function backupReplayPending(kind) {
+  return String(kind || "") !== "refused-write"
+}
+
 // Callbacks carry their enqueue time. A helper that never finishes (or a
 // failed start) cannot leave a callback pending forever: drainers drop entries
 // older than maxAgeMs and report how many were stale.
@@ -267,6 +278,7 @@ if (typeof module !== "undefined") {
     pushBounded: pushBounded,
     enqueueBatch: enqueueBatch,
     configSaveAction: configSaveAction,
+    backupReplayPending: backupReplayPending,
     pushCallback: pushCallback,
     takeFreshCallbacks: takeFreshCallbacks,
     chunkOverflow: chunkOverflow,

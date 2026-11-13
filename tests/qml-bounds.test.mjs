@@ -159,7 +159,7 @@ test("a refused configuration is backed up before the deferred write", () => {
   assert.match(service, /configBackupProc\.start\(\["cp", "--", service\.configPath, target\]\)/)
   assert.equal(/Quickshell\.execDetached\(\["cp"/.test(service), false)
   assert.match(service, /function finishConfigBackup\(result\)/)
-  assert.match(service, /function backupConfig\(followUp\)/)
+  assert.match(service, /function backupConfig\(followUp, kind\)/)
   // Every write/adoption goes through the follow-up and only on success.
   assert.match(service, /service\.backupConfig\(function\(ok\) \{\s*\n\s*if \(ok\) service\.loadConfig\(current\)/)
   assert.match(service, /service\.backupConfig\(function\(ok\) \{\s*\n\s*if \(ok\) service\.saveConfigNow\(\)/)
@@ -182,7 +182,17 @@ test("only one config backup can run at a time", () => {
   assert.equal((service.match(/configBackupProc\.start\(/g) || []).length, 1)
   assert.match(service, /if \(service\.configBackupInFlight\) \{\s*\n\s*\/\/ One copy at a time/)
   assert.match(service, /property var configBackupNext: null/)
-  assert.match(service, /if \(service\.configBackupInFlight\) service\.configBackupNext = next\s*\n\s*else service\._startConfigBackup\(next\.followUp\)/)
+  assert.match(service, /property string configBackupKind: ""/)
+  assert.match(service, /else service\._startConfigBackup\(next\.followUp, next\.kind\)/)
+})
+
+test("a deferred save is not replayed after a refused write", () => {
+  // The follow-up kind decides whether the pending save still needs its own
+  // backup: a refused-write already wrote the current configuration.
+  assert.match(service, /service\.backupConfig\(function\(ok\) \{[\s\S]{0,1200}?\}, "refused-write"\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok\) \{[\s\S]{0,400}?\}, "adoption"\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok\) \{[\s\S]{0,400}?\}, "dirty"\)/)
+  assert.match(service, /if \(!Bounds\.backupReplayPending\(kind\)\) service\.configRefusedSavePending = false/)
 })
 
 test("clipboard start failure is reported and restoreAll invalidates the check", () => {

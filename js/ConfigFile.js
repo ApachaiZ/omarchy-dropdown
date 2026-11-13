@@ -13,17 +13,29 @@ function isOwnWrite(text, lastWrite) {
   return String(text || "") === String(lastWrite || "")
 }
 
+// Two backups taken in the same second must never overwrite each other: a
+// refused-save retry can start immediately after the previous copy. The name
+// carries milliseconds and a per-process sequence, so it is unique even when
+// both calls land in the same millisecond.
+var backupSequence = 0
+
 function stamp(date) {
   var value = date instanceof Date ? date : new Date()
-  function pad(n) { return n < 10 ? "0" + n : String(n) }
-  return value.getFullYear() + pad(value.getMonth() + 1) + pad(value.getDate()) +
-    "-" + pad(value.getHours()) + pad(value.getMinutes()) + pad(value.getSeconds())
+  function pad(n, width) {
+    var text = String(n)
+    while (text.length < width) text = "0" + text
+    return text
+  }
+  return value.getFullYear() + pad(value.getMonth() + 1, 2) + pad(value.getDate(), 2) +
+    "-" + pad(value.getHours(), 2) + pad(value.getMinutes(), 2) + pad(value.getSeconds(), 2) +
+    pad(value.getMilliseconds(), 3)
 }
 
 function backupName(path, date) {
   var value = String(path || "")
   if (!value) return ""
-  return value + ".bak-" + stamp(date)
+  backupSequence++
+  return value + ".bak-" + stamp(date) + "-" + backupSequence
 }
 
 // A file that is not valid JSON is never written back over the user's copy:

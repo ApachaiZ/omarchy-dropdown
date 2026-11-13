@@ -20,8 +20,12 @@ versioning for plugin releases.
   `backupConfig` runs `cp` in a `BoundedProcess` and the write or adoption is
   deferred to its success; a failure notifies and keeps the existing
   configuration. A request made while a copy is running is kept as one
-  pending intent, never a concurrent copy. The five-backup prune runs through
-  the same bounded wrapper instead of `Quickshell.execDetached`.
+  pending intent, never a concurrent copy; a deferred save is not replayed
+  after a refused-write completion, which already wrote the current
+  configuration. Backup names carry milliseconds and a per-process sequence,
+  so two copies started in the same second never overwrite each other. The
+  five-backup prune runs through the same bounded wrapper instead of
+  `Quickshell.execDetached`.
 - A reveal batch that arrives while `hyprctl --batch` is running is queued in
   a bounded FIFO and run through the bounded wrapper instead of a detached
   fallback. Every batch settles its callback exactly once (success, failure,

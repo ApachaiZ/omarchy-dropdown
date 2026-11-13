@@ -195,6 +195,8 @@ Item {
   property bool configBackupInFlight: false
   // Follow-up of the copy currently running; it receives `ok`.
   property var configBackupFollowUp: null
+  // "refused-write" | "adoption" | "dirty": what the running follow-up does.
+  property string configBackupKind: ""
   // At most one deferred intent: the latest request made while a copy was
   // running. It starts when the current copy settles, so two copies never
   // race and a repeated request cannot loop.
@@ -359,7 +361,7 @@ Item {
           service.blockConfigWritesAfterBackupFailure()
           service.notify(service.tr("service.configBackupFailed"))
         }
-      })
+      }, "dirty")
       return
     }
     if (!ConfigFile.looksLikeConfig(current)) {
@@ -374,7 +376,7 @@ Item {
         service.blockConfigWritesAfterBackupFailure()
         service.notify(service.tr("service.configBackupFailed"))
       }
-    })
+    }, "adoption")
   }
 
   // A failed adoption backup leaves an external file we could not copy. Keep
@@ -565,21 +567,25 @@ Item {
   // Copy the file before an external edit is adopted or overwritten. The copy
   // is a bounded, awaited BoundedProcess: `followUp(ok)` runs from its
   // completion handler, and callers must not write or adopt before `ok`.
+  // `kind` tells the completion handler whether the follow-up writes the
+  // current configuration ("refused-write") or only adopts/loads it
+  // ("adoption", "dirty"); it decides whether a deferred save is replayed.
   // Five timestamped backups stay next to dropdown.json; pruning uses a
   // constant path passed as an argument, never interpolated shell text.
-  function backupConfig(followUp) {
+  function backupConfig(followUp, kind) {
     var callback = typeof followUp === "function" ? followUp : null
+    var label = String(kind || "")
     if (service.configBackupInFlight) {
       // One copy at a time. Keep only the latest deferred intent; it starts
       // once the current copy settles, so no two copies race and no request
       // is silently forgotten.
-      service.configBackupNext = { followUp: callback }
+      service.configBackupNext = { followUp: callback, kind: label }
       return true
     }
-    return service._startConfigBackup(callback)
+    return service._startConfigBackup(callback, label)
   }
 
-  function _startConfigBackup(callback) {
+  function _startConfigBackup(callback, kind) {
     var target = ConfigFile.backupName(service.configPath, new Date())
     if (!target) {
       if (callback) callback(false)
@@ -588,10 +594,12 @@ Item {
     }
     service.configBackupInFlight = true
     service.configBackupFollowUp = callback
+    service.configBackupKind = String(kind || "")
     var started = configBackupProc.start(["cp", "--", service.configPath, target])
     if (!started) {
       service.configBackupInFlight = false
       service.configBackupFollowUp = null
+      service.configBackupKind = ""
       if (callback) callback(false)
       else service.notify(service.tr("service.configBackupFailed"))
     }
@@ -601,7 +609,9 @@ Item {
   function finishConfigBackup(result) {
     service.configBackupInFlight = false
     var callback = service.configBackupFollowUp
+    var kind = service.configBackupKind
     service.configBackupFollowUp = null
+    service.configBackupKind = ""
     if (result.ok) {
       // The copy exists; keep the documented five most recent ones. The
       // bounded prune is fire-and-forget and cannot block the follow-up.
@@ -612,13 +622,18 @@ Item {
     }
     if (typeof callback === "function") callback(result.ok === true)
     else if (!result.ok) service.notify(service.tr("service.configBackupFailed"))
+    // A refused-write follow-up has just written the current in-memory
+    // configuration, which already includes every save requested during its
+    // copy. Replaying the pending flag would take a second backup (same
+    // target second) over the original and write twice.
+    if (!Bounds.backupReplayPending(kind)) service.configRefusedSavePending = false
     // A request made while this copy was running starts now, unless the
     // follow-up itself already started another copy.
     var next = service.configBackupNext
     service.configBackupNext = null
     if (next) {
       if (service.configBackupInFlight) service.configBackupNext = next
-      else service._startConfigBackup(next.followUp)
+      else service._startConfigBackup(next.followUp, next.kind)
     }
     // An explicit save that was deferred by the in-flight guard must also
     // run; startRefusedBackup keeps it pending if a copy is still active.
@@ -740,7 +755,7 @@ Item {
       if (wasRefused)
         service.notify(service.tr("service.configOverwriteAfterRefusal"))
       service.writeConfigNow()
-    })
+    }, "refused-write")
   }
 
   Timer {

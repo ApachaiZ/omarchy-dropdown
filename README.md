@@ -554,7 +554,7 @@ Animations:
 - A missing entry is reported without invalidating the rest.
 - The file is watched and hot-reloaded; writes are atomic.
 - Dropdown ignores the file-change event caused by its own write. A real
-  external edit is adopted and backed up as `dropdown.json.bak-YYYYMMDD-HHMMSS`
+  external edit is adopted and backed up as `dropdown.json.bak-YYYYMMDD-HHMMSSmmm-N`
   (five kept). Invalid JSON is backed up but never adopted or overwritten: the
   running settings stay active until the file is valid again.
 - If local edits are pending when an external write lands, the local edits win
