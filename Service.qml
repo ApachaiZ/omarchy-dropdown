@@ -195,6 +195,29 @@ Item {
   property bool configBackupInFlight: false
   property bool configBackupWasRefused: false
 
+  // Keeps the documented five most recent backups after a refused-config
+  // backup. Runs bounded and asynchronously: it never blocks or fails the
+  // write that follows a successful copy.
+  BoundedProcess {
+    id: configPruneProc
+    producerBound: false
+    timeoutMs: 5000
+    maxOutBytes: 1024
+    maxErrBytes: 2048
+    onFinished: function(result) {
+      if (!result.ok)
+        console.warn("omarchy-dropdown: backup prune failed (" +
+          service.helperDetail(result) + ")")
+    }
+  }
+
+  function pruneConfigBackups() {
+    if (configPruneProc.running) return
+    var command = ["timeout", "-k", "1", "5"].concat(ConfigFile.pruneCommand(service.configPath))
+    if (!configPruneProc.start(command))
+      console.warn("omarchy-dropdown: backup prune could not be started")
+  }
+
   // A failed read is never interpreted as "the file is absent". A bounded
   // `test -e`/`test -r` probe decides whether creating defaults is safe.
   BoundedProcess {
@@ -648,6 +671,9 @@ Item {
     service.configRefusalNotified = false
     if (wasRefused)
       service.notify(service.tr("service.configOverwriteAfterRefusal"))
+    // The backup exists; keep the documented five most recent ones. The
+    // bounded prune is fire-and-forget and cannot block or duplicate the write.
+    service.pruneConfigBackups()
     service.writeConfigNow()
   }
 

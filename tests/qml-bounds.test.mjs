@@ -113,7 +113,7 @@ test("clipboard start failure is reported and restoreAll invalidates the check",
   assert.match(service, /service\.cancelShortcutRequest\(\)\s*\n\s*service\.currentAppId/)
 })
 
-test("large-output and dispatch helpers are producer-bounded on both streams", () => {
+test("large-output and dispatch helpers bound stdout at the producer", () => {
   const ids = ["clientsProc", "monitorsProc", "bindsVerifyProc", "bindsCheckProc",
     "dispatchProc", "batchProc", "launchArmProc", "pasteProc", "barMoveProc"]
   const blocks = findBlocks(allQml, "BoundedProcess {").filter((block) =>
@@ -214,6 +214,8 @@ test("a failed config read never creates defaults unless the file is absent", ()
   assert.match(service, /function startRefusedBackup\(\)/)
   assert.match(service, /configBackupProc\.start\(\["timeout", "-k", "1", "5", "cp", "--"/)
   assert.match(service, /function finishRefusedBackup\(result\)[\s\S]*?service\.writeConfigNow\(\)/)
+  assert.match(service, /id:\s*configPruneProc/)
+  assert.match(service, /service\.pruneConfigBackups\(\)[\s\S]{0,80}service\.writeConfigNow\(\)/)
 })
 
 test("a refused state file is never rewritten automatically", () => {

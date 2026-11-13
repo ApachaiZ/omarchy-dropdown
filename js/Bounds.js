@@ -52,22 +52,22 @@ function utf8ByteLength(text) {
 }
 
 // Wrap an argv vector so the producer itself is bounded: `timeout` enforces an
-// absolute deadline, `head -c` stops stdout one byte past the consumer cap, and
-// a process-substitution `head -c` bounds stderr separately. The shell script
-// is a constant; the command and its arguments travel as positional
-// parameters, so no caller value can become shell syntax. The exit status is
-// the producer's (124 on timeout, 141 on SIGPIPE, 127 when the tool is
-// missing), not `head`'s.
-function producerCommand(argv, maxBytes, timeoutSeconds, maxErrBytes) {
+// absolute deadline and `head -c` stops stdout one byte past the consumer cap.
+// stderr is left untouched here: routing it through a process-substitution
+// `head` could delay it past `exited`, and the receiver already caps it on
+// every chunk (`waitForEnd: false` + chunkOverflow) plus an exact final check.
+// The shell script is a constant; the command and its arguments travel as
+// positional parameters, so no caller value can become shell syntax. The exit
+// status is the producer's (124 on timeout, 141 on SIGPIPE, 127 when the tool
+// is missing), not `head`'s.
+function producerCommand(argv, maxBytes, timeoutSeconds) {
   var list = []
   for (var i = 0; i < (argv || []).length; i++) list.push(String(argv[i]))
   if (list.length === 0) return []
   var cap = Math.max(1, Math.floor(Number(maxBytes) || 0)) + 1
-  var errCap = Math.max(1, Math.floor(Number(maxErrBytes) || LIMITS.helperErrBytes)) + 1
   var seconds = Math.max(1, Math.ceil(Number(timeoutSeconds) || 2))
   return ["bash", "-c",
-    "timeout -k 1 " + seconds + ' "$@" 2> >(head -c ' + errCap +
-      " >&2) | head -c " + cap + "; exit ${PIPESTATUS[0]}",
+    "timeout -k 1 " + seconds + ' "$@" | head -c ' + cap + "; exit ${PIPESTATUS[0]}",
     "bash"].concat(list)
 }
 
@@ -82,7 +82,7 @@ function fileReadCommand(path, maxBytes) {
 function clipboardCommand(primary) {
   var argv = ["wl-paste", "--no-newline"]
   if (primary === true) argv.push("--primary")
-  return producerCommand(argv, LIMITS.clipboardBytes, 2, LIMITS.clipboardErrBytes)
+  return producerCommand(argv, LIMITS.clipboardBytes, 2)
 }
 
 // Classify a file before deciding what a failed read may do. The script is

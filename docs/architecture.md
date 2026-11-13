@@ -79,7 +79,8 @@ state file ──────────► recovery ─► re-adopt parked win
   decoded once from the complete bounded buffer, so a multi-byte UTF-8
   character split across two reads is not corrupted. `waitForEnd: false`
   makes the per-chunk cap effective; producer-bound helpers also stop stdout
-  and stderr with `head -c` pipelines. A truncated payload is a failure,
+  with a `head -c` pipeline, while stderr stays direct so a delayed `head`
+  cannot truncate the diagnostic. A truncated payload is a failure,
   never a partial parse.
 
 ## Config writes

@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 122/122 pass |
+| `node --test tests/*.test.mjs` | 125/125 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -29,8 +29,9 @@ Environment where the graphical checks were run:
 | UTF-8 boundary: a valid 65536-byte payload ending in `€` decodes from the complete buffer without U+FFFD; a 70002-byte payload cut at 65537 has no U+FFFD and is classified overflow; per-chunk decoding of the same bytes demonstrably produces U+FFFD | pass |
 | File probe (`timeout bash -c 'test -e/test -r'`) returns 0 readable, 2 unreadable, 1 absent; a 124 read with a readable file is refused | pass |
 | Config/state refusal policy: defaults only for a provably absent file; timeout/overflow/permission/unknown probe keep the file untouched | pass |
-| 50 MiB stdout and 50 MiB stderr with 1–4 KiB caps stop at the cap plus one in-flight chunk (per-chunk decision `Bounds.chunkOverflow`), never at 50 MiB; a producer-bound 50 MiB stderr stream stops at cap+1 bytes | pass (`tests/bounds.test.mjs`) |
+| 50 MiB stdout and 50 MiB stderr with 1–4 KiB caps stop at the cap plus one in-flight chunk (per-chunk decision `Bounds.chunkOverflow`), never at 50 MiB; a delayed stdout `head` does not lose legitimate stderr; exit codes 0/1/2/3/7/124/127 survive the wrapper | pass (`tests/bounds.test.mjs`) |
 | Refused-config write path: bounded `cp` backup awaited; write deferred to its success; backup failure notifies and does not overwrite | pass (static invariants + backup command executed in tests) |
+| Bounded backup prune keeps the five most recent files and leaves the config untouched | pass (`tests/bounds.test.mjs`) |
 | UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts, state/catalog caps | pass (unit tests) |
 | `en.json`/`fr.json` strict key and placeholder parity | pass |
 
@@ -169,9 +170,9 @@ covered by `tests/bounds.test.mjs`.
 | Default agent file | 64 KiB |
 | Generated binds file | 1 MiB |
 | `hyprctl clients/monitors/binds` output | 4 MiB, truncated output = failure |
-| stderr, file/clipboard/status helpers | 4 KiB, producer-capped when `producerBound` (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
+| stderr, file/clipboard/status helpers | 4 KiB, per-chunk cap (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
 | stderr, file probes | 1 KiB (`configStatProc`, `stateStatProc`) |
-| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB, producer-capped (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
+| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB, per-chunk cap (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
 | BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
 | Dispatch queue | 64 expressions (oldest dropped with warning) |
 | Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
@@ -273,10 +274,11 @@ path is covered by static invariants (a `Keys` handler on the focused
   change can still make Qt's watcher stat/reload metadata, but no file content
   is read into QML by `FileView`. All content reads go through `head -c`.
 - Producer-bound helpers (clipboard, `hyprctl` JSON/dispatch/batch/launch,
-  bar move, terminal/file/cursor probes) cap stdout and stderr at the producer
-  with `head -c`; the final UTF-8 length is rechecked before any parse. The
-  remaining non-producer-bound helpers are file reads already wrapped in
-  `timeout head -c` and tiny stat probes. Every collector uses
+  bar move, terminal/file/cursor probes) cap **stdout** at the producer with
+  `head -c`; the final UTF-8 length is rechecked before any parse. stderr is
+  deliberately not routed through a producer `head`: a delayed `head` could
+  still be draining when `exited` is emitted, losing the diagnostic. stderr is
+  bounded by the per-chunk watcher instead. Every collector uses
   `waitForEnd: false`, so `dataChanged` fires per chunk and
   `Bounds.chunkOverflow` stops the helper at cap plus at most the in-flight
   chunk. `waitForEnd: true` was removed because Quickshell 0.3.2 only emitted

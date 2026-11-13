@@ -26,9 +26,10 @@ versioning for plugin releases.
   captured as raw bytes and decoded once from the complete bounded buffer
   (`StdioCollector`), so a multi-byte UTF-8 character split across reads is
   never corrupted. `waitForEnd: false` makes the per-chunk cap effective
-  before memory can grow; producer-bound helpers additionally cap stdout and
-  stderr with `head -c`. A missing or hung binary can no longer leave
-  callbacks, queues or the shortcut check blocked.
+  before memory can grow; producer-bound helpers additionally cap stdout with
+  `head -c`, while stderr stays direct so a delayed `head` cannot truncate
+  it. A missing or hung binary can no longer leave callbacks, queues or the
+  shortcut check blocked.
 - Dispatch, client/monitor callback and launch-preemption queues have explicit
   caps; stale callbacks are dropped with a warning, and a saturated launch
   queue launches without preemption instead of losing the launch.

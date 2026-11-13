@@ -70,10 +70,12 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   detection). `StdioCollector` stores the raw bytes and the text is decoded
   once, so a multi-byte character split across reads is never corrupted;
   `waitForEnd: false` makes the per-chunk cap effective before the buffer can
-  grow. Producer-bound helpers also cap stdout and stderr with `head -c`
-  pipelines. Output larger than the cap is a hard failure, never a partial
-  parse. Config/state/agent/shell/binds files are read with `timeout head -c`
-  in argv form, so a huge or malicious file is refused.
+  grow. Producer-bound helpers additionally cap stdout with `head -c`;
+  stderr stays direct so a delayed `head` cannot truncate the diagnostic and
+  is bounded by the per-chunk watcher. Output larger than the cap is a hard
+  failure, never a partial parse. Config/state/agent/shell/binds files are
+  read with `timeout head -c` in argv form, so a huge or malicious file is
+  refused.
 - **Refused files**: a failed config read is never treated as "missing". A
   bounded `test -e`/`test -r` probe decides whether defaults may be created;
   on a timeout, overflow, permission error or unknown probe state the file is
@@ -107,6 +109,19 @@ a policy-only review had missed: window titles were rendered as QML rich text.
    return file contents or tokens.
 5. Run `node --test tests/*.test.mjs`; the QML security test must pass.
 6. Update this page when a new input or sink appears.
+
+## Accepted residual limits
+
+- stderr is capped per chunk, so at most one in-flight chunk can cross the
+  configured cap before the helper is terminated.
+- The refused-config save path awaits a bounded backup. The separate
+  external-edit adoption path still requests its timestamped backup with a
+  detached `cp` (pre-existing behaviour); it never runs after a refused save.
+- `FileView` is notification/write only; its internal `watchChanges`
+  metadata handling is outside the plugin's control.
+- No live Quickshell session was used for automated paste/process tests; the
+  Qt signal wiring is covered by static invariants and real producer streams,
+  not by a running shell.
 
 ## History
 

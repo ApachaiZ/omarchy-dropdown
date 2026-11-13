@@ -12,13 +12,14 @@
 //   `StdioCollector` is configured with `waitForEnd: false`, so `dataChanged`
 //   fires per read and `_watchStream` terminates the helper once the
 //   accumulated text crosses the cap (at most one in-flight chunk beyond it).
-//   `producerBound` additionally wraps stdout and stderr so the producer stops
-//   itself: `timeout -k 1 N`, `head -c cap+1` on stdout and a
-//   process-substitution `head -c cap+1` on stderr. The final result
-//   recomputes the exact UTF-8 byte length and marks `overflow`. A partial
-//   payload is never handed to a parser as if it were complete.
-// - stderr is bounded both ways: the producer-side `head` caps it and the
-//   collector watch terminates a helper whose stderr crosses the cap.
+//   `producerBound` additionally wraps stdout so the producer stops itself
+//   with `timeout -k 1 N` plus `head -c cap+1`. The final result recomputes
+//   the exact UTF-8 byte length and marks `overflow`. A partial payload is
+//   never handed to a parser as if it were complete.
+// - stderr is not routed through a producer-side pipeline: a delayed `head`
+//   in such a pipeline could still be draining when `exited` is emitted, and
+//   the synchronous finalize would read a truncated collector. stderr is
+//   bounded by the per-chunk watcher and the exact final check instead.
 // - the QML deadline sends SIGTERM, then SIGKILL 500 ms later, and finally
 //   settles by force if the process still never reports `exited`.
 // - a failed start (binary missing) is detected through `runningChanged`.
@@ -112,7 +113,7 @@ Item {
     _tag = tag
     _active = true
     proc.command = producerBound
-      ? Bounds.producerCommand(list, maxOutBytes, producerTimeoutSeconds, maxErrBytes)
+      ? Bounds.producerCommand(list, maxOutBytes, producerTimeoutSeconds)
       : list
     // Arm the deadline before starting: a failed start can settle
     // synchronously from `runningChanged`, and the deadline must not be

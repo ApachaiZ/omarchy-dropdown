@@ -2,13 +2,14 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import { spawnSync, spawn } from "node:child_process"
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const require = createRequire(import.meta.url)
 const Bounds = require("../js/Bounds.js")
 const Model = require("../Model.js")
+const ConfigFile = require("../js/ConfigFile.js")
 
 test("utf8ByteLength counts UTF-8 bytes, not UTF-16 units", () => {
   const samples = ["", "abc", "é", "€", "😀", "aé€😀z", "\uD800", "é\uD800é"]
@@ -18,22 +19,23 @@ test("utf8ByteLength counts UTF-8 bytes, not UTF-16 units", () => {
 })
 
 test("producerCommand keeps the script constant and the command in argv", () => {
-  const command = Bounds.producerCommand(["wl-paste", "--no-newline; rm -rf /"], 65536, 2, 4096)
+  const command = Bounds.producerCommand(["wl-paste", "--no-newline; rm -rf /"], 65536, 2)
   assert.equal(command[0], "bash")
   assert.equal(command[1], "-c")
   assert.equal(command[2],
-    'timeout -k 1 2 "$@" 2> >(head -c 4097 >&2) | head -c 65537; exit ${PIPESTATUS[0]}')
+    'timeout -k 1 2 "$@" | head -c 65537; exit ${PIPESTATUS[0]}')
   assert.equal(command[3], "bash")
   assert.deepEqual(command.slice(4), ["wl-paste", "--no-newline; rm -rf /"])
+  // stderr is not routed through a process substitution: that could delay it
+  // past exited and lose the detail.
+  assert.equal(/2>/.test(command[2]), false)
 })
 
-test("producerCommand refuses empty commands and clamps both caps", () => {
+test("producerCommand refuses empty commands and clamps the cap", () => {
   assert.deepEqual(Bounds.producerCommand([], 100, 2), [])
   const command = Bounds.producerCommand(["true"], -5, 0)
   assert.match(command[2], /head -c 2;/)
   assert.match(command[2], /timeout -k 1 2 /)
-  // The default stderr cap is helperErrBytes, one byte above the consumer cap.
-  assert.match(command[2], new RegExp("head -c " + (Bounds.LIMITS.helperErrBytes + 1) + " >&2"))
 })
 
 test("fileReadCommand bounds the file producer without a shell", () => {
@@ -296,25 +298,61 @@ test("chunkOverflow only trips above the cap", () => {
   assert.equal(Bounds.chunkOverflow(1, 0), true)
 })
 
-// ---- Producer-side stderr cap, executed for real. ----
-test("producer bound stops a 50 MiB stderr stream at cap+1 bytes", () => {
+// ---- stderr is bounded by the receiver chunk guard, not the wrapper. ----
+test("a small legitimate stderr is surfaced through the producer wrapper", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-stderr-"))
   try {
-    const script = join(dir, "flood")
-    writeFileSync(script, "#!/bin/sh\nhead -c 52428800 /dev/zero | tr '\\0' e >&2\nprintf OK\n")
+    const script = join(dir, "emit")
+    writeFileSync(script, "#!/bin/sh\nprintf 'boom detail\\n' >&2\nexit 3\n")
     chmodSync(script, 0o755)
-    const command = Bounds.producerCommand([script], 4096, 15, 1024)
-    const result = spawnSync(command[0], command.slice(1), {
-      timeout: 30000,
-      encoding: null
-    })
-    assert.equal(result.stdout.toString("utf8"), "OK")
-    assert.equal(result.stderr.length, 1025, "stderr must stop at the producer cap")
-    assert.equal(result.status, 0)
-    assert.ok(result.stderr.length < 1024 * 1024)
+    const command = Bounds.producerCommand([script], 4096, 5)
+    const result = spawnSync(command[0], command.slice(1), { timeout: 15000, encoding: null })
+    assert.equal(result.status, 3)
+    assert.equal(result.stderr.toString("utf8"), "boom detail\n")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("a delayed stdout head does not lose stderr detail", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-delayed-head-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    // The wrapper resolves `head` from PATH; delay it by 50 ms and then exec
+    // the real one. stderr must still be complete at exit.
+    writeFileSync(join(bin, "head"), "#!/bin/sh\nsleep 0.05\nexec /usr/bin/head \"$@\"\n")
+    chmodSync(join(bin, "head"), 0o755)
+    const script = join(dir, "emit")
+    writeFileSync(script, "#!/bin/sh\nprintf 'out\\n'\nprintf 'delayed detail\\n' >&2\nexit 7\n")
+    chmodSync(script, 0o755)
+    const command = Bounds.producerCommand([script], 4096, 5)
+    for (let i = 0; i < 10; i++) {
+      const result = spawnSync(command[0], command.slice(1), {
+        timeout: 15000,
+        encoding: null,
+        env: { ...process.env, PATH: bin + ":" + process.env.PATH }
+      })
+      assert.equal(result.status, 7)
+      assert.equal(result.stdout.toString("utf8"), "out\n")
+      assert.equal(result.stderr.toString("utf8"), "delayed detail\n", "run " + i)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("exit codes survive the producer wrapper", () => {
+  for (const code of [0, 1, 2, 3, 7, 124]) {
+    const command = Bounds.producerCommand(["sh", "-c", "echo out; echo err >&2; exit " + code], 4096, 5)
+    const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+    assert.equal(result.status, code, "exit " + code)
+    assert.equal(result.stdout.toString("utf8"), "out\n")
+    assert.equal(result.stderr.toString("utf8"), "err\n")
+  }
+  const missing = Bounds.producerCommand(["dropdown-missing-tool-xyz"], 4096, 5)
+  const result = spawnSync(missing[0], missing.slice(1), { timeout: 10000, encoding: null })
+  assert.equal(result.status, 127)
 })
 
 // ---- Per-chunk cap algorithm on a real 50 MiB stream. ----
@@ -415,6 +453,32 @@ test("a failing backup is observable and leaves no backup behind", () => {
     assert.notEqual(result.status, 0)
     assert.equal(existsSync(target), false)
     assert.equal(readFileSync(source, "utf8"), "OLD")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the bounded prune keeps the five most recent backups", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-prune-"))
+  try {
+    const source = join(dir, "dropdown.json")
+    writeFileSync(source, "{}")
+    const names = []
+    for (let i = 0; i < 8; i++) {
+      const name = source + ".bak-2026010" + i + "-00000" + i
+      writeFileSync(name, "backup " + i)
+      const stamp = new Date(2026, 0, 1, 0, 0, i)
+      utimesSync(name, stamp, stamp)
+      names.push(name)
+    }
+    const command = ["timeout", "-k", "1", "5"].concat(ConfigFile.pruneCommand(source))
+    const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+    assert.equal(result.status, 0)
+    const left = names.filter((name) => existsSync(name))
+    assert.equal(left.length, 5)
+    // The three oldest (lowest mtime) are removed; the source is untouched.
+    assert.equal(existsSync(source), true)
+    assert.deepEqual(left, names.slice(3))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
