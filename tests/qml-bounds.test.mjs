@@ -122,6 +122,35 @@ test("the busy batch path queues bounded work instead of detaching", () => {
   assert.match(service, /var callback = service\.currentBatchCallback\s*\n\s*service\.currentBatchCallback = null\s*\n\s*if \(typeof callback === "function"\) callback\(\)\s*\n\s*service\.pumpBatch\(\)/)
   // A saturated queue still settles the rejected reveal immediately.
   assert.match(service, /if \(!queued\.accepted\) \{[\s\S]{0,220}?Qt\.callLater\(item\.callback\)/)
+  // Exactly one detached batch remains: the launch-preemption park, which
+  // must survive QML destruction and is explicitly time-bounded.
+  const detachedBatches = service.match(/Quickshell\.execDetached\(\[[^\]]*"--batch"/g) || []
+  assert.equal(detachedBatches.length, 1)
+  assert.match(service, /Quickshell\.execDetached\(\["timeout", "-k", "1", "3", "hyprctl", "--batch",\s*\n\s*batch\.join\(";"\)\]\)/)
+})
+
+test("a failed adoption backup restores the write barrier", () => {
+  const accept = findBlocks(service, "function acceptConfigRead(current)")[0]
+  // Both adoption paths (dirty rewrite and external adoption) block automatic
+  // writes when the copy fails, before notifying.
+  assert.equal((accept.match(/service\.blockConfigWritesAfterBackupFailure\(\)/g) || []).length, 2)
+  assert.match(accept, /if \(ok\) service\.saveConfigNow\(\)\s*\n\s*else \{\s*\n\s*service\.blockConfigWritesAfterBackupFailure\(\)/)
+  assert.match(accept, /if \(ok\) service\.loadConfig\(current\)\s*\n\s*else \{\s*\n\s*service\.blockConfigWritesAfterBackupFailure\(\)/)
+  const block = findBlocks(service, "function blockConfigWritesAfterBackupFailure(")[0]
+  assert.match(block, /service\.configRefused = true/)
+  assert.match(block, /configSaveTimer\.stop\(\)/)
+  // The automatic path consults the shared policy and returns before arming
+  // a save; only an explicit save reaches the backup-retry branch.
+  assert.match(service, /if \(Bounds\.configSaveAction\(service\.configRefused, explicit\) === "blocked"\) return/)
+  assert.match(service, /function saveConfigNow\(\)[\s\S]{0,220}?if \(service\.configRefused\) \{\s*\n\s*service\.startRefusedBackup\(\)/)
+})
+
+test("a save requested during a backup is retained, not dropped", () => {
+  const refused = findBlocks(service, "function startRefusedBackup()")[0]
+  assert.match(refused, /if \(service\.configBackupInFlight\) \{\s*\n\s*service\.configRefusedSavePending = true\s*\n\s*return/)
+  assert.match(refused, /service\.configRefusedSavePending = false/)
+  assert.match(service, /property bool configRefusedSavePending: false/)
+  assert.match(service, /if \(service\.configRefusedSavePending\) service\.startRefusedBackup\(\)/)
 })
 
 test("a refused configuration is backed up before the deferred write", () => {
@@ -264,7 +293,7 @@ test("a failed config read never creates defaults unless the file is absent", ()
   assert.match(service, /Bounds\.readFailurePolicy\(Bounds\.fileStateFromExit\(statResult\), failure\)/)
   assert.match(service, /if \(policy === "absent"\) service\.configAbsent\(\)/)
   assert.match(service, /property bool configRefused/)
-  assert.match(service, /if \(service\.configRefused && explicit !== true\) return/)
+  assert.match(service, /Bounds\.configSaveAction\(service\.configRefused, explicit\) === "blocked"/)
   // The refused path no longer writes after a fire-and-forget backup: the
   // bounded backup process must finish first.
   assert.match(service, /function startRefusedBackup\(\)/)

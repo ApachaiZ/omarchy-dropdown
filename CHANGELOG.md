@@ -27,7 +27,15 @@ versioning for plugin releases.
   fallback. Every batch settles its callback exactly once (success, failure,
   timeout, cancellation, or queue saturation, where the rejected batch logs
   and still runs its callback so the reveal is never blocked). Expressions of
-  one lot are still applied in a single `hyprctl --batch` pass.
+  one lot are still applied in a single `hyprctl --batch` pass. The only
+  remaining detached batch is the launch-preemption park, which must survive
+  QML destruction; it is explicitly bounded with `timeout -k 1 3` and its
+  output is not captured.
+- After a failed adoption backup, the refusal barrier is restored: automatic
+  saves (usage stats, generated keys, config normalization) are blocked so
+  they cannot overwrite an external file that was not backed up. An explicit
+  user save retries the bounded backup first. A save requested during another
+  copy is retained and run afterwards, never dropped.
 
 ## 0.8.1 — 2026-11-13
 

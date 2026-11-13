@@ -73,9 +73,11 @@ function producerCommand(argv, maxBytes, timeoutSeconds, maxErrBytes) {
   var errLimit = maxErrBytes === undefined ? maxBytes : maxErrBytes
   var errCap = Math.max(1, Math.floor(Number(errLimit) || 0)) + 1
   var seconds = Math.max(1, Math.ceil(Number(timeoutSeconds) || 2))
-  // The reader gets one extra second so it cannot outlive the QML deadline
-  // when a grandchild inherits stderr; the producer itself still stops at
-  // `seconds`.
+  // The reader gets one extra second past the producer deadline. It is not
+  // aligned with the per-instance QML `timeoutMs`, which can be shorter (for
+  // example 4.5 s for a 4 s producer bound); in that case the QML deadline
+  // escalates first and this reader timeout is only a backstop for a
+  // grandchild that keeps the stderr pipe open past the producer.
   var readerSeconds = seconds + 1
   var script = "set -o pipefail; { timeout -k 1 " + seconds +
     ' "$@" 2>&1 1>&3 | { timeout -k 1 ' + readerSeconds +
@@ -179,6 +181,15 @@ function enqueueBatch(queue, item, limit) {
   return { queue: list, accepted: true }
 }
 
+// What a save request may do. While the file is refused (unreadable, or its
+// backup failed), an automatic save is blocked outright so it can never
+// overwrite a file that was not backed up; an explicit user save still retries
+// a bounded backup first. A readable, non-refused file is written directly.
+function configSaveAction(refused, explicit) {
+  if (refused === true) return explicit === true ? "backup" : "blocked"
+  return "write"
+}
+
 // Callbacks carry their enqueue time. A helper that never finishes (or a
 // failed start) cannot leave a callback pending forever: drainers drop entries
 // older than maxAgeMs and report how many were stale.
@@ -255,6 +266,7 @@ if (typeof module !== "undefined") {
     catalogRoom: catalogRoom,
     pushBounded: pushBounded,
     enqueueBatch: enqueueBatch,
+    configSaveAction: configSaveAction,
     pushCallback: pushCallback,
     takeFreshCallbacks: takeFreshCallbacks,
     chunkOverflow: chunkOverflow,

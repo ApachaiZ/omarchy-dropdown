@@ -199,6 +199,10 @@ Item {
   // running. It starts when the current copy settles, so two copies never
   // race and a repeated request cannot loop.
   property var configBackupNext: null
+  // An explicitly requested save that asked for a backup while another copy
+  // was running. It is coalesced with repeated requests and runs after the
+  // current copy, so that save is never lost.
+  property bool configRefusedSavePending: false
 
   // Keeps the documented five most recent backups after every successful
   // config backup. Runs bounded and asynchronously: it never blocks or fails
@@ -351,7 +355,10 @@ Item {
       // after the bounded backup of the file we are about to replace.
       service.backupConfig(function(ok) {
         if (ok) service.saveConfigNow()
-        else service.notify(service.tr("service.configBackupFailed"))
+        else {
+          service.blockConfigWritesAfterBackupFailure()
+          service.notify(service.tr("service.configBackupFailed"))
+        }
       })
       return
     }
@@ -363,8 +370,19 @@ Item {
     }
     service.backupConfig(function(ok) {
       if (ok) service.loadConfig(current)
-      else service.notify(service.tr("service.configBackupFailed"))
+      else {
+        service.blockConfigWritesAfterBackupFailure()
+        service.notify(service.tr("service.configBackupFailed"))
+      }
     })
+  }
+
+  // A failed adoption backup leaves an external file we could not copy. Keep
+  // the refusal barrier so no automatic save (recordUse, ensureKeys,
+  // normalizeConfig) can overwrite it; an explicit save retries the backup.
+  function blockConfigWritesAfterBackupFailure() {
+    service.configRefused = true
+    configSaveTimer.stop()
   }
 
   // The state file is written by this service only. It is read once at
@@ -598,9 +616,13 @@ Item {
     // follow-up itself already started another copy.
     var next = service.configBackupNext
     service.configBackupNext = null
-    if (!next) return
-    if (service.configBackupInFlight) service.configBackupNext = next
-    else service._startConfigBackup(next.followUp)
+    if (next) {
+      if (service.configBackupInFlight) service.configBackupNext = next
+      else service._startConfigBackup(next.followUp)
+    }
+    // An explicit save that was deferred by the in-flight guard must also
+    // run; startRefusedBackup keeps it pending if a copy is still active.
+    if (service.configRefusedSavePending) service.startRefusedBackup()
   }
 
   function normalizeConfig() {
@@ -666,7 +688,9 @@ Item {
   // only after backing up the file we could not read and telling the user.
   function scheduleConfigSave(explicit) {
     service.configDirty = true
-    if (service.configRefused && explicit !== true) return
+    // blockConfigWritesAfterBackupFailure keeps configRefused true after a
+    // failed adoption backup, so an automatic save cannot overwrite the file.
+    if (Bounds.configSaveAction(service.configRefused, explicit) === "blocked") return
     configSaveTimer.restart()
   }
 
@@ -690,17 +714,21 @@ Item {
 
   // A refused file may only be replaced after its copy succeeded. The write
   // is deferred to the backup's follow-up; a failure notifies and leaves the
-  // file untouched. Concurrent requests share the single backup slot.
+  // file untouched. A request made while another copy is running is retained
+  // as a pending save (coalesced) and retried after that copy, so an explicit
+  // save is never dropped.
   function startRefusedBackup() {
-    if (service.configBackupInFlight) return
+    if (service.configBackupInFlight) {
+      service.configRefusedSavePending = true
+      return
+    }
+    service.configRefusedSavePending = false
     service.backupConfig(function(ok) {
       if (!ok) {
-        // If a successful read cleared the refusal while the copy was
-        // running, the file is readable again and the save may proceed.
-        if (!service.configRefused) {
-          service.writeConfigNow()
-          return
-        }
+        // The copy failed. Keep the barrier even if a read cleared the
+        // refusal while it ran: a readable file still must not be overwritten
+        // without a successful backup. The next explicit save retries.
+        service.blockConfigWritesAfterBackupFailure()
         console.warn("omarchy-dropdown: configuration backup failed; " +
           "refusing to overwrite dropdown.json")
         service.notify(service.tr("service.configBackupFailed"))
@@ -3900,7 +3928,13 @@ Item {
       batch.push("dispatch " + service.floatExpr(address))
       batch.push("dispatch " + service.opacityExpr(address, "0"))
       batch.push("dispatch " + service.moveWorkspaceExpr(address, Model.specialWorkspace(appId), false))
-      Quickshell.execDetached(["hyprctl", "--batch", batch.join(";")])
+      // This fallback must park the window even if the service is torn down
+      // while the window is mapping, so it stays detached on purpose. It is
+      // the only detached batch and is explicitly bounded: `timeout -k 1 3`
+      // stops a hung `hyprctl`. Its output is not captured; the client poll
+      // re-parks the window if the dispatch did not apply.
+      Quickshell.execDetached(["timeout", "-k", "1", "3", "hyprctl", "--batch",
+        batch.join(";")])
       return
     }
   }

@@ -78,7 +78,9 @@ state file ──────────► recovery ─► re-adopt parked win
   another is running is queued in a bounded FIFO (8 entries) and never
   detached; when the queue is full the rejected batch logs a warning and
   still runs its callback, so a reveal is never blocked. Every accepted batch
-  settles its callback exactly once.
+  settles its callback exactly once. The launch-preemption park is the one
+  deliberate exception: it must survive QML destruction, so it stays detached
+  and is bounded with `timeout -k 1 3` (output not captured).
 - **External helpers.** Every `Process` is a `BoundedProcess`: per-stream byte
   caps, an absolute deadline, SIGTERM then SIGKILL, failed-start detection and
   one terminal result. Output is captured as raw bytes by `StdioCollector` and

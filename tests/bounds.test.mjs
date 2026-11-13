@@ -59,6 +59,17 @@ test("clipboardCommand adds --primary only for the PRIMARY selection", () => {
   assert.equal(normal[2], primary[2])
 })
 
+test("an automatic save is blocked while the config is refused", () => {
+  // After a failed adoption backup the service keeps configRefused true, so
+  // recordUse/ensureKeys/normalizeConfig cannot overwrite an unbacked file.
+  assert.equal(Bounds.configSaveAction(true, false), "blocked")
+  assert.equal(Bounds.configSaveAction(true, undefined), "blocked")
+  // Only an explicit user save retries the bounded backup first.
+  assert.equal(Bounds.configSaveAction(true, true), "backup")
+  assert.equal(Bounds.configSaveAction(false, false), "write")
+  assert.equal(Bounds.configSaveAction(false, true), "write")
+})
+
 test("pushBounded caps a queue and drops the oldest entries", () => {
   let queue = []
   let dropped = 0
@@ -577,6 +588,45 @@ test("the bounded prune keeps the five most recent backups", () => {
     // The three oldest (lowest mtime) are removed; the source is untouched.
     assert.equal(existsSync(source), true)
     assert.deepEqual(left, names.slice(3))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("after a failed adoption backup, an automatic save writes nothing", () => {
+  // Compose the real failed copy with the service gate (the shared
+  // configSaveAction policy): the barrier is restored and an automatic save
+  // is blocked, leaving the external file untouched. Only an explicit save
+  // asks for a backup again.
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-adopt-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nexit 1\n")
+    chmodSync(join(bin, "cp"), 0o755)
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-test")
+    writeFileSync(source, "EXTERNAL")
+    const command = backupCommand(source, target)
+    const copy = spawnSync(command[0], command.slice(1), {
+      env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+      timeout: 15000,
+      encoding: null
+    })
+    assert.notEqual(copy.status, 0)
+    let refused = true // blockConfigWritesAfterBackupFailure on copy failure
+    let writes = 0
+    if (Bounds.configSaveAction(refused, false) !== "blocked") writes++
+    assert.equal(writes, 0)
+    assert.equal(readFileSync(source, "utf8"), "EXTERNAL")
+    assert.equal(Bounds.configSaveAction(refused, true), "backup")
+    // The explicit retry uses the real cp and succeeds, then the write runs.
+    const retry = backupCommand(source, target)
+    const ok = spawnSync(retry[0], retry.slice(1), { timeout: 15000, encoding: null })
+    assert.equal(ok.status, 0)
+    assert.equal(readFileSync(target, "utf8"), "EXTERNAL")
+    if (Bounds.configSaveAction(refused, true) === "backup" && ok.status === 0) writes++
+    assert.equal(writes, 1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

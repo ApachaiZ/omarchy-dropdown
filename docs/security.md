@@ -122,6 +122,20 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   /dev/null, so a helper that writes an unbounded amount of stderr still
   consumes CPU/IO while it runs; only the bytes reaching Qt are capped at
   `capErr+1`.
+- A helper that leaves a child inheriting stdout or stderr keeps the
+  wrapper's pipeline open. `timeout` only signals the direct child, so this
+  can surface as a false timeout (124) after the deadline, or as 137/9 when
+  the QML SIGKILL escalation ends the wrapper first. Callers branch on the
+  `timedOut` flag where it matters; the clipboard path also maps code 124.
+- The service can only retire an orphan, not reap it: a daemonizing helper
+  that detaches from the process group is outside the plugin's control.
+- The initial configuration load adopts an existing file without a backup:
+  nothing is overwritten at startup, so there is nothing to preserve. Every
+  later write or external-change adoption takes the bounded backup first.
+- The launch-preemption park is the only detached batch. It must survive QML
+  destruction, is bounded with `timeout -k 1 3`, and its output is not
+  captured; the client poll re-parks the window when the dispatch did not
+  apply.
 - `FileView` is notification/write only; its internal `watchChanges`
   metadata handling is outside the plugin's control.
 - No live Quickshell session was used for automated paste/process tests; the
@@ -136,9 +150,13 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   with the per-chunk watcher and final UTF-8 check kept as defence in depth.
   Every config backup — external-edit adoption, local-edit rewrite and
   refused-file replacement — is a bounded, awaited `cp`; the write or adoption
-  happens only after it succeeds. Busy reveal batches are queued in a bounded
-  FIFO and run through the bounded wrapper instead of a detached fallback;
-  every batch settles its callback exactly once. Reported in the marketplace
+  happens only after it succeeds. A failed adoption backup restores the
+  refusal barrier so no automatic save can overwrite the external file, and a
+  save requested during another copy is retained and run afterwards. Busy
+  reveal batches are queued in a bounded FIFO and run through the bounded
+  wrapper instead of a detached fallback (the launch-preemption park remains
+  the one deliberate, `timeout -k 1 3`-bounded exception); every batch settles
+  its callback exactly once. Reported in the marketplace
   review (`omacom/omarchy-plugin-marketplace#14610`).
 - **0.8.1** — bounded paste and bounded helpers. The Manage search field
   intercepts all keyboard paste gestures and middle-click PRIMARY; clipboard
