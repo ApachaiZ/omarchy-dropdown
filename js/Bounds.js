@@ -85,6 +85,21 @@ function producerCommand(argv, maxBytes, timeoutSeconds, maxErrBytes) {
   return ["bash", "-c", script, "bash"].concat(list)
 }
 
+// Detached calls are fire-and-forget but must still be finite. Every one is
+// wrapped in a global `timeout -k 1 N`; the command and its arguments travel
+// as a separate argv vector, never through a shell. `defaultSeconds` is used
+// when the caller does not pass an explicit bound.
+function detachedCommand(argv, seconds, defaultSeconds) {
+  var list = []
+  for (var i = 0; i < (argv || []).length; i++) list.push(String(argv[i]))
+  if (list.length === 0) return []
+  var fallback = Number(defaultSeconds) || 5
+  var requested = Number(seconds)
+  var value = isFinite(requested) && requested > 0 ? Math.ceil(requested) : fallback
+  value = Math.max(1, Math.ceil(value))
+  return ["timeout", "-k", "1", String(value)].concat(list)
+}
+
 // Bounded file read without a shell: `head` opens the path directly (argv
 // element, never interpolated), `timeout` bounds the helper. The consumer cap
 // is one byte below the produced cap.
@@ -268,6 +283,7 @@ if (typeof module !== "undefined") {
     LIMITS: LIMITS,
     utf8ByteLength: utf8ByteLength,
     producerCommand: producerCommand,
+    detachedCommand: detachedCommand,
     fileReadCommand: fileReadCommand,
     clipboardCommand: clipboardCommand,
     fileStateCommand: fileStateCommand,

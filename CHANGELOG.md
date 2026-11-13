@@ -4,6 +4,29 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.8.3 — 2026-11-13
+
+### Security
+
+- Every finite detached call now runs under a global `timeout -k 1 N` through
+  a single helper (`Bounds.detachedCommand`). This covers the `hyprctl reload`
+  paths, the detached dispatch used by launch and restoreAll, the disarm
+  `hyprctl eval`, and the startup `mkdir -p` (5 s each), plus the
+  launch-preemption park (3 s). No `Quickshell.execDetached` call site can
+  bypass the deadline; a hung detached process is terminated by the wrapper.
+- Config backups now cap destination bytes at the 1 MiB config read cap. The
+  copy writes to a deterministic `<target>.part`, renames it atomically only
+  after `cp` succeeds, and removes the temporary on failure, timeout or a
+  SIGKILL of the wrapper. A source above the cap exits 75 before creating any
+  file, the source stays intact, and the write barrier is kept with a dedicated
+  notice (`service.configBackupTooLarge`).
+- The backup prune excludes `.part` files from the five kept backups and
+  removes stale parts (older than two minutes) so a crashed copy cannot be
+  counted as a backup or linger.
+
+Preuves: `node --test tests/*.test.mjs` (152/152), `./tests/run.sh`,
+`bash -n`, `omarchy plugin validate .` and `qmllint` on the changed QML.
+
 ## 0.8.2 — 2026-11-13
 
 ### Fixed

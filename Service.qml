@@ -180,9 +180,12 @@ Item {
     }
   }
 
-  // Any configuration backup runs here: a bounded, awaited `cp`. The caller's
-  // follow-up (adopt the new file, rewrite local edits, or replace a refused
-  // file) runs from `onFinished` and only when the copy exited 0.
+  // Any configuration backup runs here: a bounded, awaited copy. The script
+  // caps the destination at the config read cap (1 MiB), copies to
+  // `<target>.part`, renames atomically only on success, and removes the
+  // temporary on every other exit path. The caller's follow-up (adopt the new
+  // file, rewrite local edits, or replace a refused file) runs from
+  // `onFinished` and only when the copy exited 0.
   BoundedProcess {
     id: configBackupProc
     producerTimeoutSeconds: 4
@@ -192,11 +195,27 @@ Item {
     onFinished: function(result) { service.finishConfigBackup(result) }
   }
 
+  // Backstop for the copy script's own EXIT trap: a SIGKILL of the wrapper
+  // (QML deadline) can leave `<target>.part`. Removals are serialised in a
+  // small bounded queue; `rm` takes the path as an argv element.
+  BoundedProcess {
+    id: configPartCleanupProc
+    producerTimeoutSeconds: 2
+    timeoutMs: 3000
+    maxOutBytes: 256
+    maxErrBytes: 512
+    onFinished: function(result) { service.pumpPartCleanup() }
+  }
+
   property bool configBackupInFlight: false
-  // Follow-up of the copy currently running; it receives `ok`.
+  // Follow-up of the copy currently running; it receives `(ok, result)`.
   property var configBackupFollowUp: null
   // "refused-write" | "adoption" | "dirty": what the running follow-up does.
   property string configBackupKind: ""
+  // Deterministic final name and its temporary for the running copy.
+  property string configBackupTarget: ""
+  property string configBackupPart: ""
+  property var configPartCleanupQueue: []
   // At most one deferred intent: the latest request made while a copy was
   // running. It starts when the current copy settles, so two copies never
   // race and a repeated request cannot loop.
@@ -355,11 +374,11 @@ Item {
     if (service.configDirty) {
       // Local edits are newer than the file: keep them and rewrite, but only
       // after the bounded backup of the file we are about to replace.
-      service.backupConfig(function(ok) {
+      service.backupConfig(function(ok, failure) {
         if (ok) service.saveConfigNow()
         else {
           service.blockConfigWritesAfterBackupFailure()
-          service.notify(service.tr("service.configBackupFailed"))
+          service.notify(service.configBackupFailureText(failure))
         }
       }, "dirty")
       return
@@ -370,11 +389,11 @@ Item {
       service.notify(service.tr("service.invalidConfig"))
       return
     }
-    service.backupConfig(function(ok) {
+    service.backupConfig(function(ok, failure) {
       if (ok) service.loadConfig(current)
       else {
         service.blockConfigWritesAfterBackupFailure()
-        service.notify(service.tr("service.configBackupFailed"))
+        service.notify(service.configBackupFailureText(failure))
       }
     }, "adoption")
   }
@@ -543,12 +562,26 @@ Item {
     return registry.isEnabled(id) === true
   }
 
+  // Detached helpers survive QML destruction, but a finite call must still be
+  // finite: every detached invocation is wrapped in a global `timeout -k 1 N`.
+  // 5 s covers a reload, a dispatch, a disarm eval and the startup mkdir; the
+  // launch-preemption park keeps its shorter 3 s bound. `Bounds.detachedCommand`
+  // is the single place that builds the wrapper, so no call site can forget it.
+  readonly property int detachedTimeoutSeconds: 5
+
+  function runDetached(argv, seconds) {
+    var command = Bounds.detachedCommand(argv, seconds, service.detachedTimeoutSeconds)
+    if (command.length === 0) return false
+    Quickshell.execDetached(command)
+    return true
+  }
+
   function cleanupBinds() {
     var header = Shortcuts.header()
     service.lastBindsContent = header
     service.bindsLoaded = true
     bindsView.setText(header)
-    Quickshell.execDetached(["hyprctl", "reload"])
+    service.runDetached(["hyprctl", "reload"])
   }
 
   function loadConfig(raw) {
@@ -589,39 +622,88 @@ Item {
     var target = ConfigFile.backupName(service.configPath, new Date())
     if (!target) {
       if (callback) callback(false)
-      else service.notify(service.tr("service.configBackupFailed"))
+      else service.notify(service.configBackupFailureText(null))
       return false
     }
     service.configBackupInFlight = true
     service.configBackupFollowUp = callback
     service.configBackupKind = String(kind || "")
-    var started = configBackupProc.start(["cp", "--", service.configPath, target])
+    service.configBackupTarget = target
+    service.configBackupPart = target + ".part"
+    var started = configBackupProc.start(ConfigFile.backupCommand(service.configPath,
+      target, Bounds.LIMITS.configBytes, 3))
     if (!started) {
       service.configBackupInFlight = false
       service.configBackupFollowUp = null
       service.configBackupKind = ""
+      service.configBackupTarget = ""
+      service.configBackupPart = ""
       if (callback) callback(false)
-      else service.notify(service.tr("service.configBackupFailed"))
+      else service.notify(service.configBackupFailureText(null))
     }
     return started
+  }
+
+  // A source above the backup byte cap exits 75 before creating anything; it
+  // is a refusal, not a generic copy failure, so the user gets the right
+  // notice and the write barrier stays in place.
+  function configBackupFailureText(result) {
+    if (result && Number(result.code) === ConfigFile.BACKUP_OVERSIZE_CODE)
+      return service.tr("service.configBackupTooLarge")
+    return service.tr("service.configBackupFailed")
+  }
+
+  // Bounded removal of a leftover `<target>.part`. The copy script already
+  // removes it on failure/timeout through its EXIT trap; this covers a
+  // SIGKILL of the wrapper. Removals run one at a time.
+  function removeBackupPart(part) {
+    var value = String(part || "")
+    if (!value) return
+    if (configPartCleanupProc.running) {
+      var queued = Bounds.enqueueBatch(service.configPartCleanupQueue, value, 8)
+      service.configPartCleanupQueue = queued.queue
+      if (!queued.accepted)
+        console.warn("omarchy-dropdown: backup-part cleanup queue full")
+      return
+    }
+    service.startPartCleanup(value)
+  }
+
+  function startPartCleanup(part) {
+    if (!configPartCleanupProc.start(["rm", "-f", "--", String(part)]))
+      console.warn("omarchy-dropdown: could not remove a backup part file")
+  }
+
+  function pumpPartCleanup() {
+    if (configPartCleanupProc.running) return
+    var queue = service.configPartCleanupQueue
+    var next = queue.shift()
+    service.configPartCleanupQueue = queue
+    if (next) service.startPartCleanup(next)
   }
 
   function finishConfigBackup(result) {
     service.configBackupInFlight = false
     var callback = service.configBackupFollowUp
     var kind = service.configBackupKind
+    var part = service.configBackupPart
     service.configBackupFollowUp = null
     service.configBackupKind = ""
+    service.configBackupTarget = ""
+    service.configBackupPart = ""
     if (result.ok) {
       // The copy exists; keep the documented five most recent ones. The
       // bounded prune is fire-and-forget and cannot block the follow-up.
       service.pruneConfigBackups()
     } else {
+      // The script removes its temporary on failure and timeout; a SIGKILL
+      // can bypass that trap, so remove the deterministic part as a backstop.
+      if (part) service.removeBackupPart(part)
       console.warn("omarchy-dropdown: configuration backup failed (" +
         service.helperDetail(result) + ")")
     }
-    if (typeof callback === "function") callback(result.ok === true)
-    else if (!result.ok) service.notify(service.tr("service.configBackupFailed"))
+    if (typeof callback === "function") callback(result.ok === true, result)
+    else if (!result.ok) service.notify(service.configBackupFailureText(result))
     // A refused-write follow-up has just written the current in-memory
     // configuration, which already includes every save requested during its
     // copy. Replaying the pending flag would take a second backup (same
@@ -738,7 +820,7 @@ Item {
       return
     }
     service.configRefusedSavePending = false
-    service.backupConfig(function(ok) {
+    service.backupConfig(function(ok, failure) {
       if (!ok) {
         // The copy failed. Keep the barrier even if a read cleared the
         // refusal while it ran: a readable file still must not be overwritten
@@ -746,7 +828,7 @@ Item {
         service.blockConfigWritesAfterBackupFailure()
         console.warn("omarchy-dropdown: configuration backup failed; " +
           "refusing to overwrite dropdown.json")
-        service.notify(service.tr("service.configBackupFailed"))
+        service.notify(service.configBackupFailureText(failure))
         return
       }
       var wasRefused = service.configRefused
@@ -1301,7 +1383,7 @@ Item {
     bindsView.setText(content)
     // Apply the new chords now. This only reloads Hyprland on an actual
     // shortcut/enable/disable change, never on window events.
-    Quickshell.execDetached(["hyprctl", "reload"])
+    service.runDetached(["hyprctl", "reload"])
   }
 
   // Hyprland re-runs its Lua config on `reload`. If the reload happened while
@@ -1350,7 +1432,7 @@ Item {
     }
     if (Model.missingBinds(binds, entries).length > 0) {
       service.notify(service.tr("service.reapplyingShortcuts"))
-      Quickshell.execDetached(["hyprctl", "reload"])
+      service.runDetached(["hyprctl", "reload"])
     }
   }
 
@@ -1822,9 +1904,10 @@ Item {
   }
 
   // Detached dispatches survive QML destruction (plugin disable, shell
-  // restart), so parked windows can always be brought back.
+  // restart), so parked windows can always be brought back. They stay finite
+  // through `runDetached`.
   function hyprDetached(expression) {
-    Quickshell.execDetached(["hyprctl", "dispatch", String(expression)])
+    service.runDetached(["hyprctl", "dispatch", String(expression)])
   }
 
   // `hyprctl --batch` applies all expressions in one compositor pass. The
@@ -2577,7 +2660,7 @@ Item {
   // Fire and forget: the reveal must not wait for the compositor to forget
   // the entry, and the 30 s expiry is the safety net.
   function disarmLaunch(appId) {
-    Quickshell.execDetached(["hyprctl", "eval",
+    service.runDetached(["hyprctl", "eval",
       "if _dropdownPending then _dropdownPending[" + Shortcuts.luaString(appId) + "] = nil end"])
   }
 
@@ -3859,7 +3942,7 @@ Item {
   // ---- Lifecycle -----------------------------------------------------------
 
   Component.onCompleted: {
-    Quickshell.execDetached(["mkdir", "-p", service.stateDir])
+    service.runDetached(["mkdir", "-p", service.stateDir])
     // A hot reload recreates the overlay but keeps this service object. Reset
     // the palette flag so the next open is not ignored as "already open".
     service.paletteOpen = false
@@ -3945,11 +4028,10 @@ Item {
       batch.push("dispatch " + service.moveWorkspaceExpr(address, Model.specialWorkspace(appId), false))
       // This fallback must park the window even if the service is torn down
       // while the window is mapping, so it stays detached on purpose. It is
-      // the only detached batch and is explicitly bounded: `timeout -k 1 3`
-      // stops a hung `hyprctl`. Its output is not captured; the client poll
+      // bounded like every detached call (`runDetached`), with a shorter 3 s
+      // deadline for the park. Its output is not captured; the client poll
       // re-parks the window if the dispatch did not apply.
-      Quickshell.execDetached(["timeout", "-k", "1", "3", "hyprctl", "--batch",
-        batch.join(";")])
+      service.runDetached(["hyprctl", "--batch", batch.join(";")], 3)
       return
     }
   }

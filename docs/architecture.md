@@ -81,6 +81,12 @@ state file ──────────► recovery ─► re-adopt parked win
   settles its callback exactly once. The launch-preemption park is the one
   deliberate exception: it must survive QML destruction, so it stays detached
   and is bounded with `timeout -k 1 3` (output not captured).
+- **Detached finite calls.** A few calls must survive QML destruction
+  (`hyprctl reload`, the detached launch/restore dispatch, the disarm `eval`,
+  the startup `mkdir -p`, and the launch-preemption park). They are still
+  finite: `Bounds.detachedCommand` wraps each argv in
+  `timeout -k 1 N` (5 s; the park 3 s), and it is the only site that calls
+  `Quickshell.execDetached`. Their output is not captured.
 - **External helpers.** Every `Process` is a `BoundedProcess`: per-stream byte
   caps, an absolute deadline, SIGTERM then SIGKILL, failed-start detection and
   one terminal result. Output is captured as raw bytes by `StdioCollector` and
@@ -106,8 +112,12 @@ Only the service writes `~/.config/omarchy/dropdown.json`.
    is our own write and is ignored.
 4. A real external change is backed up (`dropdown.json.bak-YYYYMMDD-HHMMSSmmm-N`,
    unique even when two copies start in the same second; five kept), then
-   adopted. The backup is a bounded, awaited `cp`: the
-   adoption (or the rewrite of local edits) runs only from its success
+   adopted. The backup is a bounded, awaited copy: it refuses a source above
+   the 1 MiB config cap (exit 75, no file created), writes to the deterministic
+   `<target>.part`, and renames it atomically only after the copy succeeded.
+   The temporary is removed on failure/timeout and as a SIGKILL backstop; the
+   prune excludes parts from the five and removes stale ones. The adoption (or
+   the rewrite of local edits) runs only from the success
    handler, and a failed copy notifies and leaves the file and the in-memory
    configuration untouched. Invalid JSON is backed up but never adopted:
    settings stay in memory and the file is left for the user to fix. A file

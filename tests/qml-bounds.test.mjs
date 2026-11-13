@@ -110,7 +110,8 @@ test("onExited finalizes synchronously, without a deferred run boundary", () => 
 test("the busy batch path queues bounded work instead of detaching", () => {
   // The old fallback ran a detached hyprctl when a batch was already running,
   // bypassing the deadline and caps.
-  assert.equal(/Quickshell\.execDetached\(command\)/.test(service), false)
+  const hyprBatchBlock = findBlocks(service, "function hyprBatch(")[0]
+  assert.equal(/execDetached/.test(hyprBatchBlock), false)
   assert.match(service, /Bounds\.enqueueBatch\(service\.batchQueue, item, Bounds\.LIMITS\.batchQueueItems\)/)
   assert.match(service, /function pumpBatch\(\)/)
   assert.match(service, /function startBatch\(item\)/)
@@ -122,11 +123,26 @@ test("the busy batch path queues bounded work instead of detaching", () => {
   assert.match(service, /var callback = service\.currentBatchCallback\s*\n\s*service\.currentBatchCallback = null\s*\n\s*if \(typeof callback === "function"\) callback\(\)\s*\n\s*service\.pumpBatch\(\)/)
   // A saturated queue still settles the rejected reveal immediately.
   assert.match(service, /if \(!queued\.accepted\) \{[\s\S]{0,220}?Qt\.callLater\(item\.callback\)/)
-  // Exactly one detached batch remains: the launch-preemption park, which
-  // must survive QML destruction and is explicitly time-bounded.
-  const detachedBatches = service.match(/Quickshell\.execDetached\(\[[^\]]*"--batch"/g) || []
-  assert.equal(detachedBatches.length, 1)
-  assert.match(service, /Quickshell\.execDetached\(\["timeout", "-k", "1", "3", "hyprctl", "--batch",\s*\n\s*batch\.join\(";"\)\]\)/)
+  // The launch-preemption park goes through the same bounded detached helper
+  // with its shorter 3 s deadline; no raw execDetached remains.
+  assert.match(service, /service\.runDetached\(\["hyprctl", "--batch", batch\.join\(";"\)\], 3\)/)
+})
+
+test("every detached call has a global deadline", () => {
+  // Exactly one execDetached site exists, inside runDetached, and it builds
+  // the command with the shared timeout wrapper.
+  assert.equal((service.match(/Quickshell\.execDetached\(/g) || []).length, 1)
+  assert.match(service, /function runDetached\(argv, seconds\) \{[\s\S]{0,260}?Bounds\.detachedCommand\(argv, seconds, service\.detachedTimeoutSeconds\)/)
+  assert.match(service, /Quickshell\.execDetached\(command\)/)
+  // The finite detached calls all route through the helper.
+  assert.match(service, /service\.runDetached\(\["hyprctl", "reload"\]\)/)
+  assert.equal((service.match(/service\.runDetached\(\["hyprctl", "reload"\]\)/g) || []).length, 3)
+  assert.match(service, /function hyprDetached\(expression\) \{\s*\n\s*service\.runDetached\(\["hyprctl", "dispatch", String\(expression\)\]\)/)
+  assert.match(service, /service\.runDetached\(\["hyprctl", "eval",/)
+  assert.match(service, /service\.runDetached\(\["mkdir", "-p", service\.stateDir\]\)/)
+  assert.match(service, /service\.runDetached\(\["hyprctl", "--batch", batch\.join\(";"\)\], 3\)/)
+  // No raw detached command bypasses the helper.
+  assert.equal(/Quickshell\.execDetached\(\["(?:hyprctl|mkdir)/.test(service), false)
 })
 
 test("a failed adoption backup restores the write barrier", () => {
@@ -156,13 +172,14 @@ test("a save requested during a backup is retained, not dropped", () => {
 test("a refused configuration is backed up before the deferred write", () => {
   assert.match(service, /id:\s*configBackupProc/)
   // The copy is a bounded, awaited wrapper call; no detached cp remains.
-  assert.match(service, /configBackupProc\.start\(\["cp", "--", service\.configPath, target\]\)/)
+  assert.match(service, /configBackupProc\.start\(ConfigFile\.backupCommand\(service\.configPath,/)
+  assert.match(service, /target, Bounds\.LIMITS\.configBytes, 3\)\)/)
   assert.equal(/Quickshell\.execDetached\(\["cp"/.test(service), false)
   assert.match(service, /function finishConfigBackup\(result\)/)
   assert.match(service, /function backupConfig\(followUp, kind\)/)
   // Every write/adoption goes through the follow-up and only on success.
-  assert.match(service, /service\.backupConfig\(function\(ok\) \{\s*\n\s*if \(ok\) service\.loadConfig\(current\)/)
-  assert.match(service, /service\.backupConfig\(function\(ok\) \{\s*\n\s*if \(ok\) service\.saveConfigNow\(\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok, failure\) \{\s*\n\s*if \(ok\) service\.loadConfig\(current\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok, failure\) \{\s*\n\s*if \(ok\) service\.saveConfigNow\(\)/)
   assert.match(service, /service\.writeConfigNow\(\)/)
   assert.match(service, /configBackupFollowUp: null/)
   assert.match(service, /configBackupNext/)
@@ -174,6 +191,19 @@ test("the config prune is a bounded wrapper call with no detached origin", () =>
   assert.match(service, /configPruneProc\.start\(ConfigFile\.pruneCommand\(service\.configPath\)\)/)
   assert.equal(/Quickshell\.execDetached\(ConfigFile\.pruneCommand/.test(service), false)
   assert.match(service, /id:\s*configPruneProc[\s\S]{0,220}producerTimeoutSeconds:\s*\d+/)
+})
+
+test("a backup caps destination bytes and never publishes a partial file", () => {
+  // The copy script checks the source against the config read cap, writes a
+  // deterministic .part and renames only on success; the service also removes
+  // a part left by a SIGKILL.
+  assert.match(service, /ConfigFile\.backupCommand\(service\.configPath,\s*\n\s*target, Bounds\.LIMITS\.configBytes, 3\)\)/)
+  assert.match(service, /service\.configBackupPart = target \+ "\.part"/)
+  assert.match(service, /id:\s*configPartCleanupProc/)
+  assert.match(service, /service\.removeBackupPart\(part\)/)
+  assert.match(service, /configPartCleanupProc\.start\(\["rm", "-f", "--", String\(part\)\]\)/)
+  assert.match(service, /service\.configBackupFailureText\(failure\)/)
+  assert.match(service, /Number\(result\.code\) === ConfigFile\.BACKUP_OVERSIZE_CODE/)
 })
 
 test("only one config backup can run at a time", () => {
@@ -189,9 +219,9 @@ test("only one config backup can run at a time", () => {
 test("a deferred save is not replayed after a refused write", () => {
   // The follow-up kind decides whether the pending save still needs its own
   // backup: a refused-write already wrote the current configuration.
-  assert.match(service, /service\.backupConfig\(function\(ok\) \{[\s\S]{0,1200}?\}, "refused-write"\)/)
-  assert.match(service, /service\.backupConfig\(function\(ok\) \{[\s\S]{0,400}?\}, "adoption"\)/)
-  assert.match(service, /service\.backupConfig\(function\(ok\) \{[\s\S]{0,400}?\}, "dirty"\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok, failure\) \{[\s\S]{0,1300}?\}, "refused-write"\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok, failure\) \{[\s\S]{0,400}?\}, "adoption"\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok, failure\) \{[\s\S]{0,400}?\}, "dirty"\)/)
   assert.match(service, /if \(!Bounds\.backupReplayPending\(kind\)\) service\.configRefusedSavePending = false/)
 })
 
@@ -307,7 +337,7 @@ test("a failed config read never creates defaults unless the file is absent", ()
   // The refused path no longer writes after a fire-and-forget backup: the
   // bounded backup process must finish first.
   assert.match(service, /function startRefusedBackup\(\)/)
-  assert.match(service, /service\.backupConfig\(function\(ok\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok, failure\)/)
   assert.match(service, /function startRefusedBackup\(\)[\s\S]*?service\.writeConfigNow\(\)/)
   assert.match(service, /id:\s*configPruneProc/)
   assert.match(service, /service\.pruneConfigBackups\(\)/)

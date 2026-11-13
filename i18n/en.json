@@ -287,6 +287,7 @@
   "service.configReadRefused": "dropdown.json could not be read; it was left untouched and will not be overwritten automatically.",
   "service.configOverwriteAfterRefusal": "Saving the configuration after backing up the version that could not be read.",
   "service.configBackupFailed": "The configuration was not saved because its backup failed.",
+  "service.configBackupTooLarge": "The configuration was not saved because the file is larger than the 1 MiB backup limit.",
   "service.stateReadRefused": "The saved window state could not be read; it will not be overwritten automatically.",
   "service.movedSettings": "Moved settings from %1 to %2.",
   "service.reapplyingShortcuts": "Re-applying Dropdown direct shortcuts.",

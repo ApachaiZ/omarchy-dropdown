@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import { spawnSync, spawn } from "node:child_process"
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, utimesSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, utimesSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -374,6 +374,36 @@ test("exit codes survive the producer wrapper", () => {
   assert.equal(result.status, 127)
 })
 
+test("detachedCommand wraps every detached call in a global timeout", () => {
+  const argv = ["hyprctl", "dispatch", "hl.dsp.focus({ window = \"address:0x1\" })"]
+  const command = Bounds.detachedCommand(argv, 5)
+  assert.deepEqual(command.slice(0, 4), ["timeout", "-k", "1", "5"])
+  assert.deepEqual(command.slice(4), argv)
+  assert.deepEqual(Bounds.detachedCommand([], 5), [])
+  // An omitted or invalid bound falls back to the documented default.
+  assert.equal(Bounds.detachedCommand(["true"], 0, 5)[3], "5")
+  assert.equal(Bounds.detachedCommand(["true"], -3, 5)[3], "5")
+  assert.equal(Bounds.detachedCommand(["true"], 3)[3], "3")
+})
+
+test("the detached timeout ends a long helper and preserves argv and codes", () => {
+  const long = Bounds.detachedCommand(["sh", "-c", "sleep 30"], 1)
+  const started = Date.now()
+  const timed = spawnSync(long[0], long.slice(1), { timeout: 15000, encoding: null })
+  assert.equal(timed.status, 124)
+  assert.ok(Date.now() - started < 10000, "the detached deadline must fire")
+  const tricky = "a b;$(echo hi) q\"u'é\nline"
+  const echo = Bounds.detachedCommand(["sh", "-c", "printf '[%s]' \"$1\"", "x", tricky], 5)
+  const result = spawnSync(echo[0], echo.slice(1), { timeout: 15000, encoding: null })
+  assert.equal(result.status, 0)
+  assert.equal(result.stdout.toString("utf8"), "[" + tricky + "]")
+  for (const code of [1, 3, 7]) {
+    const command = Bounds.detachedCommand(["sh", "-c", "exit " + code], 5)
+    const exited = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+    assert.equal(exited.status, code)
+  }
+})
+
 test("stderr is capped at the producer and the helper still finishes", () => {
   // 50 MiB on stderr, then a marker on stdout and exit 0. The producer must
   // not die of SIGPIPE: the reader drains past its cap, so the run completes
@@ -484,9 +514,10 @@ test("50 MiB stderr stops at the per-chunk cap, not at 50 MiB", async () => {
   assert.ok(result.textLength > cap)
 })
 
-// ---- Config backup: the exact command the service runs, awaited. ----
-function backupCommand(source, target) {
-  return Bounds.producerCommand(["cp", "--", source, target], 1024, 4, 4096)
+// ---- Config backup: the exact production command, awaited. ----
+function backupCommand(source, target, cap = 1048576, seconds = 3) {
+  const inner = ConfigFile.backupCommand(source, target, cap, seconds)
+  return Bounds.producerCommand(inner, 1024, 4, 4096)
 }
 
 test("the bounded backup copies the old file before any deferred write", async () => {
@@ -517,12 +548,14 @@ test("the bounded backup copies the old file before any deferred write", async (
   }
 })
 
-test("a failing bounded backup leaves no copy and the source intact", () => {
+test("a failing bounded backup leaves no final file and no partial file", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
   try {
     const bin = join(dir, "bin")
     mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nexit 1\n")
+    // Write a partial destination, then fail: the script must clean it up and
+    // never publish the final name.
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nfor last; do :; done\nprintf partial > \"$last\"\nexit 1\n")
     chmodSync(join(bin, "cp"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
@@ -535,23 +568,24 @@ test("a failing bounded backup leaves no copy and the source intact", () => {
     })
     assert.notEqual(result.status, 0)
     assert.equal(existsSync(target), false)
+    assert.equal(existsSync(target + ".part"), false)
     assert.equal(readFileSync(source, "utf8"), "OLD")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("a blocked bounded backup times out without writing the target", () => {
+test("a blocked bounded backup times out and removes the partial file", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
   try {
     const bin = join(dir, "bin")
     mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nsleep 30\n")
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nfor last; do :; done\nprintf partial > \"$last\"\nsleep 30\n")
     chmodSync(join(bin, "cp"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "OLD")
-    const command = backupCommand(source, target)
+    const command = backupCommand(source, target, 1048576, 1)
     const started = Date.now()
     const result = spawnSync(command[0], command.slice(1), {
       env: { ...process.env, PATH: bin + ":" + process.env.PATH },
@@ -560,14 +594,51 @@ test("a blocked bounded backup times out without writing the target", () => {
     })
     assert.equal(result.status, 124)
     assert.equal(existsSync(target), false)
+    assert.equal(existsSync(target + ".part"), false, "the EXIT trap must remove the part")
     assert.equal(readFileSync(source, "utf8"), "OLD")
-    assert.ok(Date.now() - started < 10000, "the producer deadline must fire")
+    assert.ok(Date.now() - started < 10000, "the inner deadline must fire")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("the bounded prune keeps the five most recent backups", () => {
+test("a backup above the byte cap creates nothing and keeps the source intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-cap-"))
+  try {
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-test")
+    writeFileSync(source, Buffer.alloc(2048, 0x61))
+    const command = backupCommand(source, target, 1024, 3)
+    const result = spawnSync(command[0], command.slice(1), { timeout: 15000, encoding: null })
+    assert.equal(result.status, ConfigFile.BACKUP_OVERSIZE_CODE)
+    assert.equal(existsSync(target), false)
+    assert.equal(existsSync(target + ".part"), false)
+    assert.equal(readFileSync(source).length, 2048)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a successful backup publishes the complete file and no part", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-ok-"))
+  try {
+    const source = join(dir, "drop down;$(echo pwn).json")
+    const target = source + ".bak-20260102-030405006-1"
+    writeFileSync(source, "COMPLETE")
+    const command = backupCommand(source, target)
+    const result = spawnSync(command[0], command.slice(1), { timeout: 15000, encoding: null })
+    assert.equal(result.status, 0)
+    assert.equal(readFileSync(target, "utf8"), "COMPLETE")
+    assert.equal(existsSync(target + ".part"), false)
+    assert.equal(readFileSync(source, "utf8"), "COMPLETE")
+    // No shell expansion of the path: the injected command creates nothing.
+    assert.equal(existsSync(join(dir, "pwn")), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the bounded prune keeps five valid backups and removes stale parts", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-prune-"))
   try {
     const source = join(dir, "dropdown.json")
@@ -580,6 +651,16 @@ test("the bounded prune keeps the five most recent backups", () => {
       utimesSync(name, stamp, stamp)
       names.push(name)
     }
+    const old = new Date(Date.now() - 180000)
+    const stale = []
+    for (let i = 0; i < 2; i++) {
+      const part = source + ".bak-20260109-00000" + i + "-9.part"
+      writeFileSync(part, "partial")
+      utimesSync(part, old, old)
+      stale.push(part)
+    }
+    const fresh = source + ".bak-20260109-0000059-9.part"
+    writeFileSync(fresh, "in flight")
     const command = Bounds.producerCommand(ConfigFile.pruneCommand(source), 1024, 4, 2048)
     const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
     assert.equal(result.status, 0)
@@ -588,6 +669,11 @@ test("the bounded prune keeps the five most recent backups", () => {
     // The three oldest (lowest mtime) are removed; the source is untouched.
     assert.equal(existsSync(source), true)
     assert.deepEqual(left, names.slice(3))
+    // Stale parts are removed, a fresh part may belong to an in-flight copy.
+    assert.deepEqual(stale.filter((part) => existsSync(part)), [])
+    assert.equal(existsSync(fresh), true)
+    // Parts never counted toward the five kept backups.
+    assert.equal(left.length, 5)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -707,15 +793,16 @@ test("two backups in the same millisecond get distinct names and files", () => {
     const first = ConfigFile.backupName(source, date)
     const second = ConfigFile.backupName(source, date)
     assert.notEqual(first, second)
-    for (const [target, content] of [[first, "OLD"], [second, "NEW"]]) {
+    const inodes = []
+    for (const target of [first, second]) {
       const command = backupCommand(source, target)
       const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
       assert.equal(result.status, 0)
-      writeFileSync(target, content) // overwrite to prove they are distinct files
+      assert.equal(readFileSync(target, "utf8"), "ORIGINAL")
+      assert.equal(existsSync(target + ".part"), false)
+      inodes.push(statSync(target).ino)
     }
-    assert.equal(readFileSync(first, "utf8"), "OLD")
-    assert.equal(readFileSync(second, "utf8"), "NEW")
-    assert.notEqual(first, second)
+    assert.notEqual(inodes[0], inodes[1], "the two backups are distinct files")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

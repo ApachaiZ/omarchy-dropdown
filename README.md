@@ -1,6 +1,6 @@
 # Omarchy Dropdown
 
-[![Latest release](https://img.shields.io/badge/release-v0.8.2-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
+[![Latest release](https://img.shields.io/badge/release-v0.8.3-4c8bf5)](https://github.com/ApachaiZ/omarchy-dropdown/releases/latest)
 [![Quay integration](https://img.shields.io/badge/Quay-1.1.1%2B-4c8bf5)](https://github.com/ApachaiZ/omarchy-quay)
 ![Omarchy Dropdown — Your apps. One shortcut.](preview.png)
 
@@ -632,8 +632,10 @@ failed-start detection and a single terminal result. Both stdout and stderr
 are also capped at the producer, and stderr is drained synchronously so a
 delayed reader cannot lose a diagnostic. A truncated or oversized payload is
 refused instead of parsed. Every config write or external-edit adoption
-requires a bounded backup that must succeed first; a busy reveal batch is
-queued and bounded instead of detached.
+requires a bounded backup that must succeed first (destination capped at
+1 MiB, written to a `.part` and renamed atomically); a busy reveal batch is
+queued and bounded instead of detached, and every remaining detached call is
+wrapped in a global `timeout`.
 
 `docs/architecture.md` describes the service lifecycle, config write policy and
 shortcut generation. GitHub Actions runs the unit tests, shell syntax check,

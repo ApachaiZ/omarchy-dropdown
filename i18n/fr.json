@@ -287,6 +287,7 @@
   "service.configReadRefused": "dropdown.json n'a pas pu être lu ; le fichier reste intact et ne sera pas écrasé automatiquement.",
   "service.configOverwriteAfterRefusal": "Enregistrement de la configuration après sauvegarde de la version illisible.",
   "service.configBackupFailed": "La configuration n'a pas été enregistrée car sa sauvegarde a échoué.",
+  "service.configBackupTooLarge": "La configuration n'a pas été enregistrée car le fichier dépasse la limite de 1 Mio pour les sauvegardes.",
   "service.stateReadRefused": "L'état des fenêtres n'a pas pu être lu ; il ne sera pas écrasé automatiquement.",
   "service.movedSettings": "Réglages déplacés de %1 vers %2.",
   "service.reapplyingShortcuts": "Réapplication des raccourcis directs Dropdown.",

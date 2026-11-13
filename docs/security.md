@@ -79,17 +79,27 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   the cap is a hard failure, never a partial parse. Config/state/agent/shell/
   binds files are read with `timeout head -c` in argv form, so a huge or
   malicious file is refused.
+- **Detached calls**: the few calls that must survive QML destruction
+  (`hyprctl reload`, the detached launch/restore dispatch, the disarm `eval`,
+  the startup `mkdir -p`, and the launch-preemption park) are all wrapped in a
+  global `timeout -k 1 N` by `Bounds.detachedCommand` (5 s; the park 3 s).
+  `Quickshell.execDetached` is called from that single site, so no finite
+  detached process can run without a deadline. Output is not captured.
 - **Refused files**: a failed config read is never treated as "missing". A
   bounded `test -e`/`test -r` probe decides whether defaults may be created;
   on a timeout, overflow, permission error or unknown probe state the file is
   left untouched, the configuration is marked refused and automatic writes
-  are blocked. Every config backup is a bounded `cp` run in a
+  are blocked. Every config backup is a bounded copy run in a
   `BoundedProcess`: an explicit save, an external-edit adoption and a rewrite
-  of local edits all wait for its success before writing or adopting. If the
-  backup fails, nothing is overwritten and the user is told; a second request
-  during a copy is deferred to one pending slot, never run concurrently. A
-  refused state file is never rewritten automatically; one bounded retry may
-  recover it.
+  of local edits all wait for its success before writing or adopting. The
+  destination is capped at the 1 MiB config read cap; a larger source exits
+  75 before creating anything (dedicated notice, barrier kept). The copy
+  writes `<target>.part` and renames it atomically only on success; failure,
+  timeout and a SIGKILL of the wrapper all leave no partial file, and the
+  prune removes stale parts. If the backup fails, nothing is overwritten and
+  the user is told; a second request during a copy is deferred to one pending
+  slot, never run concurrently. A refused state file is never rewritten
+  automatically; one bounded retry may recover it.
 - **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
   the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
   `~/.local/state/omarchy/`, and the bar placement file. The installer also
@@ -132,10 +142,14 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 - The initial configuration load adopts an existing file without a backup:
   nothing is overwritten at startup, so there is nothing to preserve. Every
   later write or external-change adoption takes the bounded backup first.
-- The launch-preemption park is the only detached batch. It must survive QML
-  destruction, is bounded with `timeout -k 1 3`, and its output is not
-  captured; the client poll re-parks the window when the dispatch did not
-  apply.
+- The launch-preemption park is detached so it survives QML destruction. Like
+  every detached call it is bounded by `timeout -k 1 3`; its output is not
+  captured, and the client poll re-parks the window when the dispatch did not
+  apply. Detached calls are not escalated by the QML deadline, but the
+  `timeout` wrapper still terminates a hung process.
+- A config backup above 1 MiB is refused rather than copied, so an oversized
+  (typically unreadable) configuration has no backup file; the source is left
+  intact and the write barrier stays in place.
 - `FileView` is notification/write only; its internal `watchChanges`
   metadata handling is outside the plugin's control.
 - No live Quickshell session was used for automated paste/process tests; the
@@ -144,6 +158,15 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 
 ## History
 
+- **0.8.3** — detached calls and backup bytes. Every finite detached call
+  (reload, detached launch/restore dispatch, disarm eval, startup mkdir) is
+  wrapped in a global `timeout -k 1 5`, with the preemption park at 3 s; there
+  is a single `execDetached` site. Config backups cap the destination at the
+  1 MiB read cap, write a deterministic `.part`, rename atomically only on
+  success, and remove the part on failure/timeout/SIGKILL; an oversized source
+  exits 75 without creating anything. The prune excludes parts from the five
+  kept backups and removes stale ones. Reported in the marketplace review
+  (`omacom/omarchy-plugin-marketplace#14610`).
 - **0.8.2** — process-resource prerequisites. stderr is now bounded at the
   producer by a synchronous pipeline member (a delayed `head` cannot outlive
   `exited`, and the excess is drained instead of SIGPIPE-killing the helper),

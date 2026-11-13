@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 146/146 pass |
+| `node --test tests/*.test.mjs` | 152/152 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -30,9 +30,9 @@ Environment where the graphical checks were run:
 | File probe (`timeout bash -c 'test -e/test -r'`) returns 0 readable, 2 unreadable, 1 absent; a 124 read with a readable file is refused | pass |
 | Config/state refusal policy: defaults only for a provably absent file; timeout/overflow/permission/unknown probe keep the file untouched | pass |
 | 50 MiB stdout and 50 MiB stderr stop at the producer cap plus one byte, never at 50 MiB; a delayed `head` preserves legitimate stderr (10/10 runs); a producer that floods stderr still finishes (no SIGPIPE); a legitimate grandchild's stderr survives; quotes, separators, UTF-8 and newlines in argv stay one argument; exit codes 0/1/2/3/7/124/127 survive the wrapper | pass (`tests/bounds.test.mjs`) |
-| Config backup: bounded `cp` awaited for adoption, local-edit rewrite and refused replacement; delayed copy completes before the write; failing copy leaves source and target intact; blocked copy times out (124) without a target; the receiver guard still trips on an oversized stream | pass (`tests/bounds.test.mjs` + static invariants) |
-| Bounded backup prune keeps the five most recent files and leaves the config untouched | pass (`tests/bounds.test.mjs`) |
-| Busy reveal batches: batches arriving during a slow `hyprctl` run are queued, executed in order, and each callback fires once; a saturated queue settles the rejected callback and logs. The busy-path fallback is bounded; the only detached `hyprctl --batch` is the launch-preemption park, explicitly bounded with `timeout -k 1 3` | pass (`tests/bounds.test.mjs` + static invariants) |
+| Every finite detached call is bounded: one `Quickshell.execDetached` site builds `timeout -k 1 N` via `Bounds.detachedCommand` (reload/dispatch/eval/mkdir 5 s, park 3 s); the wrapper ends a long fake helper (124), preserves complex argv and propagates 1/3/7 | pass (`tests/bounds.test.mjs` + static invariants) |
+| Config backup: bounded copy awaited for adoption, local-edit rewrite and refused replacement; destination bytes capped at 1 MiB (source above cap exits 75, creates nothing, source and barrier intact); writes to `.part` and renames atomically; failing/blocked copy removes the part; prune keeps five valid backups, excludes and removes stale parts | pass (`tests/bounds.test.mjs`) |
+| Busy reveal batches: batches arriving during a slow `hyprctl` run are queued, executed in order, and each callback fires once; a saturated queue settles the rejected callback and logs. The launch-preemption park uses the same bounded detached helper with a 3 s deadline | pass (`tests/bounds.test.mjs` + static invariants) |
 | Failed adoption backup: the refusal barrier is restored, so a later automatic save is blocked (no write without a successful backup); an explicit save retries the backup | pass (unit policy + static call-graph invariants) |
 | Two refused saves during a slow backup: one write, one backup, and the backup holds the pre-write content; same-millisecond backup names are distinct files | pass (`tests/bounds.test.mjs`) |
 | UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts, state/catalog caps | pass (unit tests) |
@@ -153,7 +153,7 @@ Environment where the graphical checks were run:
 | Geometry/tab-position settings keep the palette open | works |
 | Bar widget remains visible after moving it on a portrait output | works in the left section; the centre/right sections of that bar can render off-window |
 
-## Bounds and clipboard (0.8.2)
+## Bounds and clipboard (0.8.3)
 
 All external helpers run through `components/BoundedProcess.qml`. Output is
 captured by `StdioCollector` (raw bytes, decoded once) rather than a chunk
@@ -180,6 +180,8 @@ live in `js/Bounds.js` and are covered by `tests/bounds.test.mjs`.
 | stderr, config backup/prune | 4 KiB / 2 KiB producer cap (`configBackupProc`, `configPruneProc`) |
 | BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
 | Dispatch queue | 64 expressions (oldest dropped with warning) |
+| Detached finite calls | 5 s global `timeout -k 1 5` (reload, dispatch, disarm eval, startup mkdir); launch park 3 s |
+| Config backup | destination capped at 1 MiB; `.part` + atomic rename; stale parts removed after 2 min |
 | Reveal batch queue | 8 lots (newest refused when full; its callback still runs) |
 | Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
 | Launch preemption queue | 32 entries; overflow launches without preemption |
@@ -209,12 +211,14 @@ the real probe command):
 | Config read overflows the cap | refuse, keep the previous configuration |
 | File provably absent | defaults created (config) / state writable |
 | File present but unreadable | refuse, notify, no automatic write |
-| Explicit user save after a refusal | bounded `cp` backup awaited first; write only if the copy exits 0; failure notifies and leaves the file untouched |
-| External edit adoption | bounded `cp` awaited first; the new file is adopted only on exit 0; failure notifies and keeps the old configuration |
+| Explicit user save after a refusal | bounded backup awaited first; write only if the copy exits 0; failure notifies and leaves the file untouched |
+| External edit adoption | bounded backup awaited first; the new file is adopted only on exit 0; failure notifies and keeps the old configuration |
 | Backup request during a copy | kept as one pending intent and started after the current copy; never two concurrent copies |
-| Backup `cp` delayed | the write waits for the bounded process to finish (no fire-and-forget race) |
-| Backup `cp` blocked | the producer deadline exits 124; no target and no write |
-| Backup `cp` fails | notice `configBackupFailed`, refusal kept, file not overwritten |
+| Backup delayed | the write waits for the bounded process to finish (no fire-and-forget race) |
+| Backup blocked | the inner deadline exits 124; no final file, no `.part`, no write |
+| Backup fails | notice `configBackupFailed`, refusal kept, no final file, no `.part`, source untouched |
+| Source above the backup cap | exit 75 before any file is created; dedicated notice `configBackupTooLarge`, source and write barrier kept |
+| Stale `.part` from a killed copy | removed by the prune (older than 2 min); parts never count toward the five kept backups |
 | State read refused | no automatic state rewrite; one bounded retry |
 
 **Not exercised graphically:** the real keyboard paste routing under Wayland
