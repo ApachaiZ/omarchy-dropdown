@@ -20,7 +20,6 @@ var LIMITS = {
   queueItems: 64,
   launchArmItems: 32,
   callbackMaxAgeMs: 30000,
-  configApps: 512,
   stateEntries: 512,
   catalogApps: 4096
 }
@@ -80,6 +79,61 @@ function clipboardCommand(primary) {
   var argv = ["wl-paste", "--no-newline"]
   if (primary === true) argv.push("--primary")
   return producerCommand(argv, LIMITS.clipboardBytes, 2)
+}
+
+// Classify a file before deciding what a failed read may do. The script is
+// constant and the path is a positional parameter: exit 0 readable, 1 absent,
+// 2 present but unreadable. `timeout` keeps the probe bounded.
+function fileStateCommand(path) {
+  return ["timeout", "-k", "1", "2", "bash", "-c",
+    'if [ -e "$1" ]; then if [ -r "$1" ]; then exit 0; else exit 2; fi; else exit 1; fi',
+    "bash", String(path || "")]
+}
+
+// -1 = unknown (probe failed), 0 = readable, 1 = absent, 2 = unreadable.
+// The probe exits non-zero for "absent" and "unreadable", so this reads the
+// code even when `ok` is false; only overflow/timeout/failed start/cancel are
+// treated as an unknown probe.
+function fileStateFromExit(result) {
+  if (!result) return -1
+  if (result.overflow || result.timedOut || result.startFailed || result.canceled) return -1
+  var code = Number(result.code)
+  if (code === 0) return 0
+  if (code === 1) return 1
+  if (code === 2) return 2
+  return -1
+}
+
+// A read that failed may only create defaults when the file is provably
+// absent. Timeouts, overflows, failed starts, permission errors and an
+// unknown probe state all keep the file untouched.
+function readFailurePolicy(fileState, failure) {
+  if (fileState === 1) return "absent"
+  if (failure && (failure.overflow || failure.timedOut || failure.startFailed)) return "refuse"
+  if (fileState === 0 || fileState === 2) return "refuse"
+  return "refuse"
+}
+
+// Collect at most `limit` own keys from a parsed object. Used for state
+// entries: a hostile or corrupt state file cannot grow the registry map.
+function boundedKeys(source, limit) {
+  var keys = []
+  var dropped = 0
+  if (!source || typeof source !== "object") return { keys: keys, dropped: 0 }
+  var max = Math.max(1, Math.floor(Number(limit) || 1))
+  for (var key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+    if (keys.length >= max) { dropped++; continue }
+    keys.push(key)
+  }
+  return { keys: keys, dropped: dropped }
+}
+
+// Admission test for the derived desktop-entry catalog. The service calls
+// this before adding a discovered entry.
+function catalogRoom(discoveredCount, ordinaryCount, limit) {
+  var used = (Number(discoveredCount) || 0) + (Number(ordinaryCount) || 0)
+  return used < Math.max(0, Math.floor(Number(limit) || 0))
 }
 
 // Bounded queue push: drop the oldest entries when the cap is reached so no
@@ -158,6 +212,11 @@ if (typeof module !== "undefined") {
     producerCommand: producerCommand,
     fileReadCommand: fileReadCommand,
     clipboardCommand: clipboardCommand,
+    fileStateCommand: fileStateCommand,
+    fileStateFromExit: fileStateFromExit,
+    readFailurePolicy: readFailurePolicy,
+    boundedKeys: boundedKeys,
+    catalogRoom: catalogRoom,
     pushBounded: pushBounded,
     pushCallback: pushCallback,
     takeFreshCallbacks: takeFreshCallbacks,

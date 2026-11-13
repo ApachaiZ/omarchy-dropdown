@@ -168,3 +168,119 @@ test("producer bound reports a missing clipboard tool", () => {
   assert.equal(result.status, 127)
   assert.equal(result.stdout.length, 0)
 })
+
+// A multibyte character straddling the boundary between two reads is the
+// defect a per-chunk decoder produces: each half becomes U+FFFD. Decoding the
+// complete bounded buffer must keep the character intact, while the exact
+// byte cap still rejects a payload one byte too large.
+test("a multibyte UTF-8 character on the read boundary survives whole-buffer decoding", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-utf8-"))
+  try {
+    const prefix = Buffer.alloc(65533, 0x61) // 'a'
+    const euro = Buffer.from("€", "utf8")
+    const payload = Buffer.concat([prefix, euro])
+    assert.equal(payload.length, 65536)
+    writeFileSync(join(dir, "payload"), payload)
+    writeFileSync(join(dir, "wl-paste"), "#!/bin/sh\ncat \"$(dirname \"$0\")/payload\"\n")
+    chmodSync(join(dir, "wl-paste"), 0o755)
+    const result = runClipboardProducer({ ...process.env, PATH: dir + ":" + process.env.PATH })
+    assert.equal(result.status, 0)
+    assert.equal(result.stdout.length, 65536)
+    const whole = result.stdout.toString("utf8")
+    assert.equal(whole.includes("�"), false)
+    assert.equal(Bounds.utf8ByteLength(whole), 65536)
+    assert.ok(Bounds.utf8ByteLength(whole) <= Bounds.LIMITS.clipboardBytes)
+    // Same bytes decoded per chunk, with the split inside the euro sign.
+    const chunked = result.stdout.subarray(0, 65534).toString("utf8") +
+      result.stdout.subarray(65534).toString("utf8")
+    assert.ok(chunked.includes("�"), "the regression fixture must corrupt chunked decoding")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("producer cap at a multibyte boundary yields overflow without replacement characters", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-utf8-"))
+  try {
+    const prefix = Buffer.alloc(65534, 0x61)
+    const euro = Buffer.from("€", "utf8") // bytes 65534..65536, fully inside cap+1
+    const suffix = Buffer.alloc(4465, 0x62)
+    writeFileSync(join(dir, "payload"), Buffer.concat([prefix, euro, suffix]))
+    writeFileSync(join(dir, "wl-paste"), "#!/bin/sh\ncat \"$(dirname \"$0\")/payload\"\n")
+    chmodSync(join(dir, "wl-paste"), 0o755)
+    const result = runClipboardProducer({ ...process.env, PATH: dir + ":" + process.env.PATH })
+    assert.equal(result.stdout.length, Bounds.LIMITS.clipboardBytes + 1)
+    // The producer may finish before head closes the pipe (status 0) or die of
+    // SIGPIPE (141). The overflow verdict comes from the exact byte length,
+    // not from the producer's exit code.
+    const text = result.stdout.toString("utf8")
+    assert.equal(text.includes("�"), false)
+    assert.ok(Bounds.utf8ByteLength(text) > Bounds.LIMITS.clipboardBytes)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("readFailurePolicy only creates defaults for a provably absent file", () => {
+  // 124 from the producer's timeout, with the file still readable.
+  assert.equal(Bounds.readFailurePolicy(0, { code: 124 }), "refuse")
+  assert.equal(Bounds.readFailurePolicy(0, { overflow: true }), "refuse")
+  assert.equal(Bounds.readFailurePolicy(0, { startFailed: true }), "refuse")
+  assert.equal(Bounds.readFailurePolicy(2, { code: 1 }), "refuse")
+  assert.equal(Bounds.readFailurePolicy(-1, { code: 1 }), "refuse")
+  assert.equal(Bounds.readFailurePolicy(1, { code: 1 }), "absent")
+  assert.equal(Bounds.readFailurePolicy(1, { timedOut: true }), "absent")
+  // The probe maps its own exit codes, and only a failed/overflowing probe is
+  // unknown. Exit 1 and 2 are meaningful even though `ok` is false.
+  assert.equal(Bounds.fileStateFromExit({ ok: true, code: 0 }), 0)
+  assert.equal(Bounds.fileStateFromExit({ ok: false, code: 1 }), 1)
+  assert.equal(Bounds.fileStateFromExit({ ok: false, code: 2 }), 2)
+  assert.equal(Bounds.fileStateFromExit({ ok: false, code: 0 }), 0)
+  assert.equal(Bounds.fileStateFromExit({ ok: false, code: 0, timedOut: true }), -1)
+  assert.equal(Bounds.fileStateFromExit({ ok: false, code: 1, startFailed: true }), -1)
+  assert.equal(Bounds.fileStateFromExit({ ok: false, code: 7 }), -1)
+})
+
+test("fileStateCommand probes existence and readability with a constant script", () => {
+  const command = Bounds.fileStateCommand("/tmp/dropdown a;$(x).json")
+  assert.deepEqual(command.slice(0, 6), ["timeout", "-k", "1", "2", "bash", "-c"])
+  assert.match(command[6], /\[ -e "\$1" \]/)
+  assert.match(command[6], /\[ -r "\$1" \]/)
+  assert.equal(command[7], "bash")
+  assert.equal(command[8], "/tmp/dropdown a;$(x).json")
+})
+
+test("fileStateCommand distinguishes readable, absent and unreadable files", () => {
+  if (typeof process.getuid === "function" && process.getuid() === 0)
+    return // root can read a mode-000 file; the probe would report 0
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-stat-"))
+  try {
+    const file = join(dir, "dropdown.json")
+    const command = Bounds.fileStateCommand(file)
+    const run = () => spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+    writeFileSync(file, "{}")
+    assert.equal(run().status, 0)
+    chmodSync(file, 0o000)
+    assert.equal(run().status, 2)
+    rmSync(file)
+    assert.equal(run().status, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("boundedKeys caps state entries and reports dropped keys", () => {
+  const apps = {}
+  for (let i = 0; i < 600; i++) apps["app." + i] = { address: "0x1" }
+  const bounded = Bounds.boundedKeys(apps, Bounds.LIMITS.stateEntries)
+  assert.equal(bounded.keys.length, Bounds.LIMITS.stateEntries)
+  assert.equal(bounded.dropped, 600 - Bounds.LIMITS.stateEntries)
+  assert.deepEqual(Bounds.boundedKeys(null, 10), { keys: [], dropped: 0 })
+})
+
+test("catalogRoom stops admitting entries at the catalog limit", () => {
+  assert.equal(Bounds.catalogRoom(0, 0, 4), true)
+  assert.equal(Bounds.catalogRoom(2, 1, 4), true)
+  assert.equal(Bounds.catalogRoom(2, 2, 4), false)
+  assert.equal(Bounds.catalogRoom(4096, 0, Bounds.LIMITS.catalogApps), false)
+})

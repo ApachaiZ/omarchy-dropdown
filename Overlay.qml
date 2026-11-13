@@ -780,8 +780,13 @@ Item {
       // never be inserted.
       if (!Bounds.isCurrentGeneration(result.tag, overlay.pasteGeneration)) return
       if (result.canceled) return
-      if (result.timedOut) { overlay.say(strings.t("notice.clipboardTimeout")); return }
-      if (result.startFailed || result.code === 127) {
+      // The producer's own `timeout` exits 124; the component deadline sets
+      // timedOut only when the wrapper itself had to be killed.
+      if (result.timedOut || result.code === 124) {
+        overlay.say(strings.t("notice.clipboardTimeout"))
+        return
+      }
+      if (result.startFailed || result.code === 126 || result.code === 127) {
         overlay.say(strings.t("notice.clipboardUnavailable"))
         return
       }

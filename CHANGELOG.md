@@ -22,9 +22,11 @@ versioning for plugin releases.
 - Every external helper (`hyprctl`, `xdg-terminal-exec`, `xdg-mime`,
   `wl-paste`, `omarchy bar`, file reads) now runs through a shared
   `BoundedProcess`: per-stream byte caps, an absolute deadline, SIGTERM then
-  SIGKILL, failed-start detection and a single terminal result. A missing or
-  hung binary can no longer leave callbacks, queues or the shortcut check
-  blocked.
+  SIGKILL, failed-start detection and a single terminal result. Output is
+  captured as raw bytes and decoded once from the complete bounded buffer
+  (`StdioCollector`), so a multi-byte UTF-8 character split across reads is
+  never corrupted. A missing or hung binary can no longer leave callbacks,
+  queues or the shortcut check blocked.
 - Dispatch, client/monitor callback and launch-preemption queues have explicit
   caps; stale callbacks are dropped with a warning, and a saturated launch
   queue launches without preemption instead of losing the launch.
@@ -34,6 +36,12 @@ versioning for plugin releases.
   bounded producers (1 MiB, 4 MiB, 64 KiB, 1 MiB, 1 MiB); an oversized file is
   refused rather than partially parsed, and the previous configuration is
   kept. Config apps, state entries and the desktop-entry catalog are capped.
+- A failed configuration read is no longer treated as a missing file. A
+  bounded `test -e`/`test -r` probe decides whether defaults may be created;
+  on a timeout, overflow, permission error or unknown probe state the file is
+  left intact, automatic saves are blocked, and the user is notified. An
+  explicit later save backs the file up first. A refused state file is never
+  rewritten automatically; one bounded retry may recover it.
 
 ## 0.8.0 — 2026-11-10
 

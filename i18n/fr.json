@@ -283,6 +283,9 @@
 
   "service.invalidConfig": "dropdown.json n'est pas un JSON valide ; les réglages actuels sont conservés.",
   "service.unreadableConfig": "dropdown.json n'est plus lisible ; les réglages actuels sont conservés.",
+  "service.configReadRefused": "dropdown.json n'a pas pu être lu ; le fichier reste intact et ne sera pas écrasé automatiquement.",
+  "service.configOverwriteAfterRefusal": "Enregistrement de la configuration après sauvegarde de la version illisible.",
+  "service.stateReadRefused": "L'état des fenêtres n'a pas pu être lu ; il ne sera pas écrasé automatiquement.",
   "service.movedSettings": "Réglages déplacés de %1 vers %2.",
   "service.reapplyingShortcuts": "Réapplication des raccourcis directs Dropdown.",
   "service.catalogRefreshed": "Catalogue actualisé.",

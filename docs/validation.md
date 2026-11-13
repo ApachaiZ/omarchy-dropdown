@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 100/100 pass |
+| `node --test tests/*.test.mjs` | 112/112 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -22,11 +22,14 @@ Environment where the graphical checks were run:
 | Geometry for top/bottom/left/right, transforms, clamps | pass |
 | Webapp class derivation from real Chromium classes | pass |
 | Key collision / reserved commands | pass |
-| No `StdioCollector` and no raw `Process` remains; every helper declares a deadline and caps | pass (static test) |
+| `StdioCollector` exists only inside `BoundedProcess`; no raw `Process` in Service/Overlay; every helper declares a deadline and caps | pass (static test) |
 | `FileView` is notification/write only (`preload: false`, no `text()`/`data()`) | pass (static test) |
 | Manage search intercepts `StandardKey.Paste`, caps `maximumLength`, middle-click area | pass (static test) |
 | Producer bound: 1 MiB fake `wl-paste` yields exactly 65537 bytes and a non-zero status; 100-byte payload passes; hang yields 124 within ~2 s; failure/missing tool propagate 3/127 | pass (`tests/bounds.test.mjs`) |
-| UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts | pass (unit tests) |
+| UTF-8 boundary: a valid 65536-byte payload ending in `€` decodes from the complete buffer without U+FFFD; a 70002-byte payload cut at 65537 has no U+FFFD and is classified overflow; per-chunk decoding of the same bytes demonstrably produces U+FFFD | pass |
+| File probe (`timeout bash -c 'test -e/test -r'`) returns 0 readable, 2 unreadable, 1 absent; a 124 read with a readable file is refused | pass |
+| Config/state refusal policy: defaults only for a provably absent file; timeout/overflow/permission/unknown probe keep the file untouched | pass |
+| UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts, state/catalog caps | pass (unit tests) |
 | `en.json`/`fr.json` strict key and placeholder parity | pass |
 
 ## Graphical, on the real session
@@ -146,8 +149,12 @@ Environment where the graphical checks were run:
 
 ## Bounds and clipboard (0.8.1)
 
-All external helpers run through `components/BoundedProcess.qml`. Numeric
-limits live in `js/Bounds.js` and are covered by `tests/bounds.test.mjs`.
+All external helpers run through `components/BoundedProcess.qml`. Output is
+captured by `StdioCollector` (raw bytes, decoded once) rather than a chunk
+splitter, because decoding each `readyRead` chunk separately corrupts a
+multi-byte UTF-8 character that straddles two reads. Byte caps are enforced
+before any caller parses; numeric limits live in `js/Bounds.js` and are
+covered by `tests/bounds.test.mjs`.
 
 | Resource | Cap |
 | --- | --- |
@@ -160,7 +167,10 @@ limits live in `js/Bounds.js` and are covered by `tests/bounds.test.mjs`.
 | Default agent file | 64 KiB |
 | Generated binds file | 1 MiB |
 | `hyprctl clients/monitors/binds` output | 4 MiB, truncated output = failure |
-| Helper stderr | 8 KiB |
+| stderr, file/clipboard/status helpers | 4 KiB (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
+| stderr, file probes | 1 KiB (`configStatProc`, `stateStatProc`) |
+| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
+| BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
 | Dispatch queue | 64 expressions (oldest dropped with warning) |
 | Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
 | Launch preemption queue | 32 entries; overflow launches without preemption |
@@ -180,6 +190,18 @@ touched):
 | Tool missing | exit 127, start failure surfaced |
 | New paste / focus loss / close during a read | generation token invalidates the result; nothing is inserted |
 | Pasted text above the filter cap | refused with a notice, field unchanged |
+
+Config/state file scenarios (behavioral unit tests over the pure policy and
+the real probe command):
+
+| Scenario | Result |
+| --- | --- |
+| Config read exits 124 but the probe says the file is readable | refuse, keep the file intact, block automatic saves, notify |
+| Config read overflows the cap | refuse, keep the previous configuration |
+| File provably absent | defaults created (config) / state writable |
+| File present but unreadable | refuse, notify, no automatic write |
+| Explicit user save after a refusal | backup requested first, then write, notice shown |
+| State read refused | no automatic state rewrite; one bounded retry |
 
 **Not exercised graphically:** the real keyboard paste routing under Wayland
 (Ctrl+V, Shift+Insert) and the middle-click PRIMARY interception. The code
@@ -202,6 +224,11 @@ path is covered by static invariants (a `Keys` handler on the focused
   `ydotool`/`wlrctl` is installed. The QML catchers call `outsideClick()` and
   `switchToTab()` directly; those functions were exercised through the
   keyboard path, which is the same code.
+- **`BoundedProcess` under a live Quickshell.** No second Quickshell was
+  started on the active session. The producer/UTF-8/cap behaviour is exercised
+  with the exact commands and a real `head`/`timeout`/`bash` pipeline, but the
+  QML component itself (failed-start detection, SIGKILL escalation, FIFO
+  restart) was only statically checked.
 - **Live monitor hotplug/removal and scale change.** The code listens to
   Hyprland monitor events and revalidates the visible window; no output was
   physically disconnected during the checks. `openOn` covers the per-screen
@@ -240,6 +267,11 @@ path is covered by static invariants (a `Keys` handler on the focused
   internal `watchChanges` behaviour is not bounded by this plugin: a file
   change can still make Qt's watcher stat/reload metadata, but no file content
   is read into QML by `FileView`. All content reads go through `head -c`.
+- stdout is producer-bounded (`head -c cap+1`) and the complete buffer is
+  byte-checked before decoding by the caller. stderr is not producer-bounded
+  (there is no byte-preserving split for it): a collector watcher terminates
+  the helper as soon as the text crosses the cap, and the exact UTF-8 length
+  is rechecked at exit, so at most one in-flight chunk can overshoot.
 - Qt 6.12 `TextInput` has no `dragEnter`/`dropEvent` and does not set
   `ItemAcceptsDrops`, so dragging text onto the search field inserts nothing.
   No drop handler was added because there is no native insertion path to

@@ -622,7 +622,14 @@ compositor:
 - `js/Keymap.js` — palette intent and drawer grid movement;
 - `js/Shortcuts.js` — shortcut ownership, Hyprland conflicts, Lua rendering;
 - `js/ConfigFile.js` — atomic-write policy, backups, invalid-JSON handling;
-- `js/State.js` — managed-window state labels.
+- `js/State.js` — managed-window state labels;
+- `js/Bounds.js` — byte caps, producer commands, queue/callback bounds,
+  paste generation and file-refusal policy.
+
+Every external command runs through `components/BoundedProcess.qml`: per-stream
+byte caps, an absolute deadline, SIGTERM→SIGKILL, failed-start detection and a
+single terminal result. Clipboard paste and file reads are producer-bounded;
+a truncated or oversized payload is refused instead of parsed.
 
 `docs/architecture.md` describes the service lifecycle, config write policy and
 shortcut generation. GitHub Actions runs the unit tests, shell syntax check,

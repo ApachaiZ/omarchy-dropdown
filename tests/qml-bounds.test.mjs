@@ -34,8 +34,27 @@ function findBlocks(text, opener) {
   }
 }
 
-test("no unbounded StdioCollector remains", () => {
-  assert.equal(allQml.includes("StdioCollector"), false)
+const component = readFileSync("components/BoundedProcess.qml", "utf8")
+
+test("streams are decoded once from a bounded buffer, never per chunk", () => {
+  // StdioCollector stores the raw bytes and decodes the whole bounded buffer;
+  // SplitParser would decode each read separately and corrupt a multi-byte
+  // character split across two chunks.
+  assert.equal(/(^|\n)\s*SplitParser\s*\{/.test(allQml), false)
+  assert.equal(findBlocks(component, "StdioCollector {").length, 2)
+  assert.match(component, /stdout:\s*StdioCollector\s*\{/)
+  assert.match(component, /stderr:\s*StdioCollector\s*\{/)
+  assert.match(component, /id:\s*outCollector/)
+  assert.match(component, /id:\s*errCollector/)
+  assert.match(component, /onDataChanged:\s*root\._watchStream\(outCollector, root\.maxOutBytes\)/)
+  assert.match(component, /onDataChanged:\s*root\._watchStream\(errCollector, root\.maxErrBytes\)/)
+  // Exact byte length is rechecked before any caller can parse the text.
+  assert.match(component, /Bounds\.utf8ByteLength\(outText\)\s*>\s*maxOutBytes/)
+  assert.match(component, /Bounds\.utf8ByteLength\(errText\)\s*>\s*maxErrBytes/)
+  // The only collector in the repository is inside the bounded wrapper.
+  for (const file of qmlFiles) {
+    assert.equal(readFileSync(file, "utf8").includes("StdioCollector"), false, file)
+  }
 })
 
 test("no QML file instantiates a raw Process", () => {
@@ -46,7 +65,7 @@ test("no QML file instantiates a raw Process", () => {
 
 test("every helper uses a bounded component with a deadline and a cap", () => {
   const blocks = findBlocks(allQml, "BoundedProcess {")
-  assert.ok(blocks.length >= 14, "expected every former Process to be wrapped")
+  assert.ok(blocks.length >= 16, "expected every former Process to be wrapped")
   for (const block of blocks) {
     assert.match(block, /timeoutMs:\s*\d+/, block.slice(0, 60))
     assert.match(block, /maxOutBytes:/, block.slice(0, 60))
@@ -54,12 +73,24 @@ test("every helper uses a bounded component with a deadline and a cap", () => {
   }
 })
 
+test("queued starts use a bounded FIFO instead of a single overwritten slot", () => {
+  assert.match(component, /property var _queue:\s*\[\]/)
+  assert.equal(/_next\b/.test(component), false)
+  assert.match(component, /_queue\.push\(/)
+  assert.match(component, /_queue\.shift\(\)/)
+  assert.match(component, /_queue\.length >= maxQueue/)
+  assert.match(component, /function _beginNext\(\)/)
+  assert.match(component, /function _terminate\(\)/)
+  assert.match(component, /function _finalize\(code\)/)
+  assert.match(component, /function _watchStream\(/)
+})
+
 test("no helper is started through a bare running assignment", () => {
   const ids = [
     "clientsProc", "monitorsProc", "dispatchProc", "batchProc", "launchArmProc",
     "bindsCheckProc", "bindsVerifyProc", "cursorProc", "terminalIdProc", "filesIdProc",
     "configReadProc", "stateReadProc", "agentReadProc", "bindsReadProc", "barMoveProc",
-    "barConfigReadProc", "pasteProc"
+    "barConfigReadProc", "pasteProc", "configStatProc", "stateStatProc"
   ]
   for (const id of ids) {
     const pattern = new RegExp("\\b" + id + "\\.running\\s*=")
@@ -118,4 +149,32 @@ test("shortcut and launch watchdogs really terminate their helper", () => {
   assert.match(service, /launchGuardTimer\.restart\(\)/)
   assert.match(service, /launchGuardTimer\.stop\(\)/)
   assert.match(service, /if \(service\.launching\[appId\]\) return/)
+})
+
+test("a shortcut check result is bound to its request generation", () => {
+  assert.match(service, /property int shortcutCheckGeneration/)
+  assert.match(service, /bindsCheckProc\.start\(\["hyprctl", "binds", "-j"\], service\.shortcutCheckGeneration\)/)
+  assert.match(service, /if \(!Bounds\.isCurrentGeneration\(result\.tag, service\.shortcutCheckGeneration\)\) return/)
+  assert.match(service, /finishShortcutCheck\(result\.out, result\.tag\)/)
+})
+
+test("clipboard maps the producer timeout and failed start", () => {
+  assert.match(overlay, /result\.timedOut \|\| result\.code === 124/)
+  assert.match(overlay, /result\.startFailed \|\| result\.code === 126 \|\| result\.code === 127/)
+})
+
+test("a failed config read never creates defaults unless the file is absent", () => {
+  assert.match(service, /Bounds\.fileStateCommand\(service\.configPath\)/)
+  assert.match(service, /Bounds\.readFailurePolicy\(Bounds\.fileStateFromExit\(statResult\), failure\)/)
+  assert.match(service, /if \(policy === "absent"\) service\.configAbsent\(\)/)
+  assert.match(service, /property bool configRefused/)
+  assert.match(service, /if \(service\.configRefused && explicit !== true\) return/)
+  assert.match(service, /service\.backupConfig\(\)[\s\S]{0,200}service\.configRefused = false/)
+})
+
+test("a refused state file is never rewritten automatically", () => {
+  assert.match(service, /property bool stateWritable/)
+  assert.match(service, /if \(!service\.stateWritable\) return/)
+  assert.match(service, /if \(!service\.stateWritable\) \{/)
+  assert.match(service, /stateRetryTimer\.restart\(\)/)
 })

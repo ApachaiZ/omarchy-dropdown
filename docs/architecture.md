@@ -75,8 +75,11 @@ state file ──────────► recovery ─► re-adopt parked win
   exposed in `status`/`doctor`.
 - **External helpers.** Every `Process` is a `BoundedProcess`: per-stream byte
   caps, an absolute deadline, SIGTERM then SIGKILL, failed-start detection and
-  one terminal result. JSON helpers are producer-bounded (`timeout … | head
-  -c`); a truncated payload is a failure, never a partial parse.
+  one terminal result. Output is captured as raw bytes by `StdioCollector` and
+  decoded once from the complete bounded buffer, so a multi-byte UTF-8
+  character split across two reads is not corrupted. JSON helpers are
+  producer-bounded (`timeout … | head -c`); a truncated payload is a failure,
+  never a partial parse.
 
 ## Config writes
 

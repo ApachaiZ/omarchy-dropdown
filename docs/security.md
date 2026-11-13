@@ -67,9 +67,18 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   `tests/qml-bounds.test.mjs`.
 - **Helper processes**: every `Process` is wrapped in `BoundedProcess`
   (per-stream caps, absolute deadline, SIGTERM→SIGKILL, failed-start
-  detection). Output larger than the cap is a hard failure, never a partial
-  parse. Config/state/agent/shell/binds files are read with
-  `timeout head -c` in argv form, so a huge or malicious file is refused.
+  detection). `StdioCollector` stores the raw bytes and the text is decoded
+  once, so a multi-byte character split across reads is never corrupted.
+  Output larger than the cap is a hard failure, never a partial parse.
+  Config/state/agent/shell/binds files are read with `timeout head -c` in argv
+  form, so a huge or malicious file is refused.
+- **Refused files**: a failed config read is never treated as "missing". A
+  bounded `test -e`/`test -r` probe decides whether defaults may be created;
+  on a timeout, overflow, permission error or unknown probe state the file is
+  left untouched, the configuration is marked refused and automatic writes
+  are blocked. An explicit later save backs the file up first and tells the
+  user. A refused state file is never rewritten automatically; one bounded
+  retry may recover it.
 - **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
   the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
   `~/.local/state/omarchy/`, and the bar placement file. The installer also
@@ -102,9 +111,12 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   intercepts all keyboard paste gestures and middle-click PRIMARY; clipboard
   reads are producer- and consumer-bounded (64 KiB, 2 s) with stale-request
   cancellation. All external helpers gained deadlines, output caps,
-  SIGTERM→SIGKILL escalation and failed-start recovery; files are read through
-  bounded producers and queues/collections have explicit caps. Reported in
-  the marketplace review (`omacom/omarchy-plugin-marketplace#14610`).
+  SIGTERM→SIGKILL escalation and failed-start recovery; streams are decoded
+  once from a complete bounded buffer (a per-chunk decoder could corrupt
+  split UTF-8 characters), and refused config/state files are never
+  overwritten automatically. Files are read through bounded producers and
+  queues/collections have explicit caps. Reported in the marketplace review
+  (`omacom/omarchy-plugin-marketplace#14610`).
 - **0.7.14** — audit hardening. `luaString` escapes batch separators
   (`;[]`) so a workspace name cannot inject a `hyprctl --batch` dispatch;
   generated bind commands shell-quote the desktop app id; config/state reject

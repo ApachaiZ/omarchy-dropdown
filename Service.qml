@@ -106,6 +106,7 @@ Item {
   property string lastAppId: ""
   property string notice: ""
   property var pendingShortcut: null
+  property int shortcutCheckGeneration: 0
   signal shortcutAssigned(string appId, string shortcut)
   signal shortcutRejected(string appId, string message)
   property bool paletteOpen: false
@@ -163,17 +164,50 @@ Item {
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.configBytes
     maxErrBytes: 4096
-    onFinished: function(result) { service.handleConfigRead(result) }
+    onFinished: function(result) {
+      if (result.ok) {
+        service.acceptConfigRead(result.out)
+        // A change arrived while this read was running: read again with a
+        // fresh generation instead of leaving the request pending.
+        if (service.configReadAgain && !configReadProc.running) {
+          service.configReadAgain = false
+          service.readConfig()
+        }
+      } else {
+        service.inspectConfigFailure(result)
+      }
+    }
+  }
+
+  // A failed read is never interpreted as "the file is absent". A bounded
+  // `test -e`/`test -r` probe decides whether creating defaults is safe.
+  BoundedProcess {
+    id: configStatProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: 1024
+    maxErrBytes: 1024
+    onFinished: function(result) { service.handleConfigStat(result) }
   }
 
   property bool configReadAgain: false
+  property int configReadGeneration: 0
+  property bool configStatBusy: false
+  property var configStatFailure: null
+  property var configStatPendingFailure: null
+  // A refused configuration is never written automatically. An explicit save
+  // backs the existing file up first and tells the user.
+  property bool configRefused: false
+  property bool configRefusalNotified: false
 
   function readConfig() {
+    service.configReadGeneration++
     if (configReadProc.running) {
       service.configReadAgain = true
       return
     }
-    configReadProc.start(Bounds.fileReadCommand(service.configPath, Bounds.LIMITS.configBytes))
+    configReadProc.start(Bounds.fileReadCommand(service.configPath, Bounds.LIMITS.configBytes),
+      service.configReadGeneration)
   }
 
   function configFileChanged() {
@@ -181,42 +215,85 @@ Item {
     service.readConfig()
   }
 
-  function handleConfigRead(result) {
-    var again = service.configReadAgain
-    service.configReadAgain = false
-    if (result.overflow || result.timedOut || result.startFailed) {
-      console.warn("omarchy-dropdown: dropdown.json could not be read within the " +
-        Bounds.LIMITS.configBytes + "-byte limit; keeping the previous configuration")
-      // A loaded configuration is never replaced by a read that failed; a
-      // transient timeout or an oversized file keeps the current settings.
-      if (!service.configLoaded) service.configReadFailed(false)
-    } else if (!result.ok) {
-      service.configReadFailed(true)
-    } else {
-      service.acceptConfigRead(result.out)
-    }
-    if (again && !configReadProc.running) service.readConfig()
-  }
-
-  // `mayCreate` is true only for a plain non-zero exit (missing or unreadable
-  // file), matching the previous FileView behaviour: the first start creates a
-  // default config. Overflow, timeout and failed start never overwrite a file
-  // they could not read.
-  function configReadFailed(mayCreate) {
-    service.configPendingChange = false
-    if (service.configLoaded) {
-      service.notify(service.tr("service.unreadableConfig"))
+  function inspectConfigFailure(failure) {
+    if (configStatBusy) {
+      service.configStatPendingFailure = failure
       return
     }
-    service.configLoaded = true
+    configStatBusy = true
+    configStatFailure = failure
+    configStatProc.start(Bounds.fileStateCommand(service.configPath))
+  }
+
+  function handleConfigStat(statResult) {
+    configStatBusy = false
+    var failure = service.configStatFailure
+    service.configStatFailure = null
+    // A newer read started while the probe was running: its own outcome (and
+    // its own probe) decides. An old failure must not refuse a file that is
+    // now readable.
+    var superseded = failure && failure.tag !== undefined &&
+      failure.tag !== service.configReadGeneration
+    if (!superseded) {
+      var policy = Bounds.readFailurePolicy(Bounds.fileStateFromExit(statResult), failure)
+      if (policy === "absent") service.configAbsent()
+      else service.configRefuseRead(failure)
+    }
+    if (service.configStatPendingFailure) {
+      var next = service.configStatPendingFailure
+      service.configStatPendingFailure = null
+      service.inspectConfigFailure(next)
+      return
+    }
+    if (service.configReadAgain && !configReadProc.running) {
+      service.configReadAgain = false
+      service.readConfig()
+    }
+  }
+
+  // The file is provably absent: creating defaults cannot destroy anything.
+  function configAbsent() {
+    service.configReadAgain = false
+    if (!service.configLoaded) {
+      service.configLoaded = true
+      service.configDirty = false
+      service.config = Model.clone(Model.DEFAULT_CONFIG)
+      service.saveConfigNow()
+      service.rebuildCatalog()
+      autostartTimer.restart()
+      return
+    }
+    // A loaded configuration whose file disappeared stays in memory; a later
+    // explicit save may recreate the file safely.
+    service.configRefused = false
+    service.configRefusalNotified = false
+  }
+
+  // Timeout, overflow, permission error, missing tool or an unknown probe:
+  // keep the file exactly as it is and refuse automatic writes.
+  function configRefuseRead(failure) {
+    service.configReadAgain = false
+    console.warn("omarchy-dropdown: dropdown.json could not be read (" +
+      service.helperDetail(failure) + "); keeping it untouched")
+    service.configRefused = true
     service.configDirty = false
-    service.config = Model.clone(Model.DEFAULT_CONFIG)
-    if (mayCreate) service.saveConfigNow()
-    service.rebuildCatalog()
-    autostartTimer.restart()
+    service.configPendingChange = false
+    configSaveTimer.stop()
+    if (!service.configLoaded) {
+      service.configLoaded = true
+      service.config = Model.clone(Model.DEFAULT_CONFIG)
+      service.rebuildCatalog()
+      autostartTimer.restart()
+    }
+    if (!service.configRefusalNotified) {
+      service.configRefusalNotified = true
+      service.notify(service.tr("service.configReadRefused"))
+    }
   }
 
   function acceptConfigRead(current) {
+    service.configRefused = false
+    service.configRefusalNotified = false
     if (!service.configLoaded) {
       service.loadConfig(current)
       return
@@ -260,26 +337,117 @@ Item {
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.stateBytes
     maxErrBytes: 4096
-    onFinished: function(result) { service.handleStateRead(result) }
+    onFinished: function(result) {
+      if (result.ok) service.acceptStateRead(result.out)
+      else service.inspectStateFailure(result)
+    }
   }
+
+  BoundedProcess {
+    id: stateStatProc
+    producerBound: false
+    timeoutMs: 3000
+    maxOutBytes: 1024
+    maxErrBytes: 1024
+    onFinished: function(result) { service.handleStateStat(result) }
+  }
+
+  // The state file is only replaced after a successful read (or when it is
+  // provably absent). A refused state is never overwritten automatically.
+  property bool stateWritable: false
+  property bool stateRefused: false
+  property bool stateRefusalNotified: false
+  property bool stateRefusalWarned: false
+  property int stateReadAttempts: 0
+  property int stateReadGeneration: 0
+  property bool stateStatBusy: false
+  property var stateStatFailure: null
+  property var stateStatPendingFailure: null
 
   function readState() {
     if (stateReadProc.running) return
-    stateReadProc.start(Bounds.fileReadCommand(service.statePath, Bounds.LIMITS.stateBytes))
+    service.stateReadGeneration++
+    stateReadProc.start(Bounds.fileReadCommand(service.statePath, Bounds.LIMITS.stateBytes),
+      service.stateReadGeneration)
   }
 
-  function handleStateRead(result) {
-    if (result.ok) {
-      service.loadState(result.out)
+  function acceptStateRead(raw) {
+    service.stateWritable = true
+    service.stateRefused = false
+    service.stateRefusalNotified = false
+    service.stateRefusalWarned = false
+    service.stateReadAttempts = 0
+    service.loadState(raw)
+    var known = false
+    for (var id in service.registry) known = true
+    if (known) service.scheduleStateSave()
+  }
+
+  function inspectStateFailure(failure) {
+    if (stateStatBusy) {
+      service.stateStatPendingFailure = failure
       return
     }
-    if (result.overflow)
-      console.warn("omarchy-dropdown: dropdown-state.json exceeds " +
-        Bounds.LIMITS.stateBytes + " bytes; ignoring it")
+    stateStatBusy = true
+    stateStatFailure = failure
+    stateStatProc.start(Bounds.fileStateCommand(service.statePath))
+  }
+
+  function handleStateStat(statResult) {
+    stateStatBusy = false
+    var failure = service.stateStatFailure
+    service.stateStatFailure = null
+    var superseded = failure && failure.tag !== undefined &&
+      failure.tag !== service.stateReadGeneration
+    if (!superseded) {
+      var policy = Bounds.readFailurePolicy(Bounds.fileStateFromExit(statResult), failure)
+      if (policy === "absent") {
+        // Nothing to lose: a missing state file may be created by the service.
+        service.stateWritable = true
+        service.stateRefused = false
+        service.stateRefusalNotified = false
+        service.stateRefusalWarned = false
+        service.stateReadAttempts = 0
+        service.loadState("")
+      } else {
+        service.stateRefuseRead(failure)
+      }
+    }
+    if (service.stateStatPendingFailure) {
+      var next = service.stateStatPendingFailure
+      service.stateStatPendingFailure = null
+      service.inspectStateFailure(next)
+    }
+  }
+
+  function stateRefuseRead(failure) {
+    console.warn("omarchy-dropdown: dropdown-state.json could not be read (" +
+      service.helperDetail(failure) + "); it will not be overwritten automatically")
+    service.stateWritable = false
+    service.stateRefused = true
     service.stateLoaded = true
     service.savedRegistry = {}
     service.recoverFromSaved()
     autostartTimer.restart()
+    if (!service.stateRefusalNotified) {
+      service.stateRefusalNotified = true
+      service.notify(service.tr("service.stateReadRefused"))
+    }
+    // One bounded retry: a transient timeout can recover without ever
+    // replacing the file with an empty registry.
+    if (service.stateReadAttempts === 0) {
+      service.stateReadAttempts = 1
+      stateRetryTimer.restart()
+    }
+  }
+
+  Timer {
+    id: stateRetryTimer
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      if (!service.stateWritable) service.readState()
+    }
   }
 
   property var savedRegistry: ({})
@@ -392,13 +560,23 @@ Item {
     }
   }
 
-  function scheduleConfigSave() {
+  // `explicit` is set by user-facing settings changes. When the file was
+  // refused, automatic saves are blocked; an explicit change still saves, but
+  // only after backing up the file we could not read and telling the user.
+  function scheduleConfigSave(explicit) {
     service.configDirty = true
+    if (service.configRefused && explicit !== true) return
     configSaveTimer.restart()
   }
 
   function saveConfigNow() {
     configSaveTimer.stop()
+    if (service.configRefused) {
+      service.backupConfig()
+      service.configRefused = false
+      service.configRefusalNotified = false
+      service.notify(service.tr("service.configOverwriteAfterRefusal"))
+    }
     var text = ConfigFile.encode(service.config)
     service.lastConfigWrite = text
     service.configDirty = false
@@ -415,19 +593,16 @@ Item {
     var parsed = null
     try { parsed = JSON.parse(String(raw || "")) } catch (e) { parsed = null }
     var out = {}
-    var count = 0
     if (parsed && parsed.apps && typeof parsed.apps === "object") {
-      for (var id in parsed.apps) {
-        if (!Object.prototype.hasOwnProperty.call(parsed.apps, id)) continue
+      var bounded = Bounds.boundedKeys(parsed.apps, Bounds.LIMITS.stateEntries)
+      if (bounded.dropped > 0)
+        console.warn("omarchy-dropdown: dropdown-state.json has more than " +
+          Bounds.LIMITS.stateEntries + " entries; ignoring " + bounded.dropped)
+      for (var k = 0; k < bounded.keys.length; k++) {
+        var id = bounded.keys[k]
         if (id === "__proto__" || id === "constructor" || id === "prototype") continue
-        if (count >= Bounds.LIMITS.stateEntries) {
-          console.warn("omarchy-dropdown: dropdown-state.json has more than " +
-            Bounds.LIMITS.stateEntries + " entries; ignoring the rest")
-          break
-        }
         var entry = parsed.apps[id]
         if (!entry || !Model.validAddress(entry.address)) continue
-        count++
         // Older builds recorded a parking workspace here; it is not a real
         // destination and must be dropped when the state is recovered.
         var previousWorkspace = String(entry.previousWorkspace || "")
@@ -471,11 +646,22 @@ Item {
   }
 
   function scheduleStateSave() {
+    if (!service.stateWritable) return
     stateSaveTimer.restart()
   }
 
   function saveStateNow() {
     stateSaveTimer.stop()
+    // Never replace a state file that could not be read (timeout, overflow,
+    // permission error). `stateWritable` is set only after a successful read
+    // or a proven absence, and a one-shot retry may lift the refusal.
+    if (!service.stateWritable) {
+      if (!service.stateRefusalWarned) {
+        service.stateRefusalWarned = true
+        console.warn("omarchy-dropdown: state save skipped until dropdown-state.json can be read")
+      }
+      return
+    }
     var apps = {}
     for (var id in service.registry) {
       var entry = service.registry[id]
@@ -714,7 +900,7 @@ Item {
     for (var i = 0; i < values.length; i++) {
       var entry = values[i]
       if (!entry || !entry.id) continue
-      if (discovered.length + ordinary.length >= Bounds.LIMITS.catalogApps) {
+      if (!Bounds.catalogRoom(discovered.length, ordinary.length, Bounds.LIMITS.catalogApps)) {
         console.warn("omarchy-dropdown: more than " + Bounds.LIMITS.catalogApps +
           " desktop entries; ignoring the rest")
         break
@@ -1155,12 +1341,14 @@ Item {
 
   // Human-readable detail for a failed helper result (console and `doctor`).
   function helperDetail(result) {
-    if (!result) return ""
+    if (!result) return "unknown failure"
     if (result.overflow) return "output limit exceeded"
     if (result.timedOut) return "timed out"
     if (result.startFailed) return "could not start"
+    if (result.canceled) return "canceled"
     var detail = String(result.err || "").trim()
-    return detail
+    if (detail) return detail
+    return "exit " + result.code
   }
 
   // Surface a Hyprland dispatch failure instead of dropping it. The same
@@ -3086,6 +3274,8 @@ Item {
   function cancelShortcutRequest() {
     bindsCheckTimeout.stop()
     service.pendingShortcut = null
+    service.shortcutCheckGeneration++
+    bindsCheckProc.cancel()
   }
 
   function validateShortcut(appId, value) {
@@ -3116,35 +3306,52 @@ Item {
     if (app.shortcut === chord) return { ok: true, shortcut: chord }
     if (bindsCheckProc.running || service.pendingShortcut)
       return { ok: false, message: service.tr("service.shortcutCheckRunning") }
-    service.pendingShortcut = { appId: appId, chord: chord }
-    bindsCheckProc.start(["hyprctl", "binds", "-j"])
+    service.shortcutCheckGeneration++
+    service.pendingShortcut = {
+      appId: appId,
+      chord: chord,
+      generation: service.shortcutCheckGeneration
+    }
+    if (!bindsCheckProc.start(["hyprctl", "binds", "-j"], service.shortcutCheckGeneration)) {
+      service.pendingShortcut = null
+      return { ok: false, message: service.tr("service.shortcutCheckRunning") }
+    }
     bindsCheckTimeout.restart()
     return { ok: true, pending: true, shortcut: chord }
   }
 
   // A missing/failed `hyprctl binds` must not leave the capture UI stuck on
   // "Checking" forever and block every later shortcut assignment. The timer
-  // really terminates the helper (SIGTERM, then SIGKILL inside the component)
-  // and the late result is ignored because `pendingShortcut` is cleared.
+  // really terminates the helper (SIGTERM, then SIGKILL inside the component).
+  // The request generation makes a late or cancelled result from an older
+  // request unable to clear a newer pending one; every terminal path emits
+  // either `shortcutAssigned` or `shortcutRejected`.
   Timer {
     id: bindsCheckTimeout
     interval: 4000
     onTriggered: {
       var pending = service.pendingShortcut
       service.pendingShortcut = null
+      service.shortcutCheckGeneration++
       bindsCheckProc.cancel()
       if (!pending) return
       service.shortcutRejected(pending.appId, service.tr("service.shortcutCheckTimeout"))
     }
   }
 
-  function finishShortcutCheck(raw) {
+  function finishShortcutCheck(raw, generation) {
     bindsCheckTimeout.stop()
+    if (generation !== undefined &&
+        !Bounds.isCurrentGeneration(generation, service.shortcutCheckGeneration)) return
     var pending = service.pendingShortcut
     service.pendingShortcut = null
+    service.shortcutCheckGeneration++
     if (!pending) return
     var app = service.findApp(pending.appId)
-    if (!app) return
+    if (!app) {
+      service.shortcutRejected(pending.appId, service.tr("service.unknownApplication"))
+      return
+    }
     var binds = []
     try { binds = JSON.parse(String(raw || "[]")) } catch (e) { binds = [] }
     if (!Array.isArray(binds)) binds = []
@@ -3178,15 +3385,19 @@ Item {
     maxOutBytes: Bounds.LIMITS.hyprOutputBytes
     maxErrBytes: Bounds.LIMITS.helperErrBytes
     onFinished: function(result) {
+      // Ignore a result that belongs to a superseded request before touching
+      // `pendingShortcut` or the watchdog: an old cancelled result must never
+      // erase or disarm a newer request.
+      if (!Bounds.isCurrentGeneration(result.tag, service.shortcutCheckGeneration)) return
       bindsCheckTimeout.stop()
       if (result.ok) {
-        service.finishShortcutCheck(result.out)
+        service.finishShortcutCheck(result.out, result.tag)
         return
       }
       var pending = service.pendingShortcut
       if (!pending) return
       service.pendingShortcut = null
-      if (result.canceled) return
+      service.shortcutCheckGeneration++
       service.shortcutRejected(pending.appId, service.tr("service.shortcutCheckTimeout"))
     }
   }
@@ -3216,7 +3427,7 @@ Item {
       next.settings.geometry.preset = "custom"
     }
     service.config = next
-    service.scheduleConfigSave()
+    service.scheduleConfigSave(true)
     if (path.indexOf("settings.geometry.") === 0) service.revalidateShownWindow()
   }
 
