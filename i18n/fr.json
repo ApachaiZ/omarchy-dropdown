@@ -195,6 +195,7 @@
   "notice.clipboardTooLarge": "Le contenu du presse-papiers est trop volumineux pour être collé.",
   "notice.clipboardTooLong": "Le texte collé dépasse le filtre de %1 caractères.",
   "notice.clipboardFailed": "Le presse-papiers n'a pas pu être lu.",
+  "notice.clipboardBusy": "Trop de demandes de presse-papiers ; réessayez.",
 
   "bar.help": "Déplacez le widget Dropdown entre les sections gauche, centre et droite de la barre Omarchy.",
   "bar.section": "Section",
@@ -285,6 +286,7 @@
   "service.unreadableConfig": "dropdown.json n'est plus lisible ; les réglages actuels sont conservés.",
   "service.configReadRefused": "dropdown.json n'a pas pu être lu ; le fichier reste intact et ne sera pas écrasé automatiquement.",
   "service.configOverwriteAfterRefusal": "Enregistrement de la configuration après sauvegarde de la version illisible.",
+  "service.configBackupFailed": "La configuration n'a pas été enregistrée car sa sauvegarde a échoué.",
   "service.stateReadRefused": "L'état des fenêtres n'a pas pu être lu ; il ne sera pas écrasé automatiquement.",
   "service.movedSettings": "Réglages déplacés de %1 vers %2.",
   "service.reapplyingShortcuts": "Réapplication des raccourcis directs Dropdown.",

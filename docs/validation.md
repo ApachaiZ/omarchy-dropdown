@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 112/112 pass |
+| `node --test tests/*.test.mjs` | 121/121 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -29,6 +29,8 @@ Environment where the graphical checks were run:
 | UTF-8 boundary: a valid 65536-byte payload ending in `€` decodes from the complete buffer without U+FFFD; a 70002-byte payload cut at 65537 has no U+FFFD and is classified overflow; per-chunk decoding of the same bytes demonstrably produces U+FFFD | pass |
 | File probe (`timeout bash -c 'test -e/test -r'`) returns 0 readable, 2 unreadable, 1 absent; a 124 read with a readable file is refused | pass |
 | Config/state refusal policy: defaults only for a provably absent file; timeout/overflow/permission/unknown probe keep the file untouched | pass |
+| 50 MiB stdout and 50 MiB stderr with 1–4 KiB caps stop at the cap plus one in-flight chunk (per-chunk decision `Bounds.chunkOverflow`), never at 50 MiB; a producer-bound 50 MiB stderr stream stops at cap+1 bytes | pass (`tests/bounds.test.mjs`) |
+| Refused-config write path: bounded `cp` backup awaited; write deferred to its success; backup failure notifies and does not overwrite | pass (static invariants + backup command executed in tests) |
 | UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts, state/catalog caps | pass (unit tests) |
 | `en.json`/`fr.json` strict key and placeholder parity | pass |
 
@@ -167,7 +169,7 @@ covered by `tests/bounds.test.mjs`.
 | Default agent file | 64 KiB |
 | Generated binds file | 1 MiB |
 | `hyprctl clients/monitors/binds` output | 4 MiB, truncated output = failure |
-| stderr, file/clipboard/status helpers | 4 KiB (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
+| stderr, file/clipboard/status helpers | 4 KiB, producer-capped when `producerBound` (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
 | stderr, file probes | 1 KiB (`configStatProc`, `stateStatProc`) |
 | stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
 | BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
@@ -200,7 +202,9 @@ the real probe command):
 | Config read overflows the cap | refuse, keep the previous configuration |
 | File provably absent | defaults created (config) / state writable |
 | File present but unreadable | refuse, notify, no automatic write |
-| Explicit user save after a refusal | backup requested first, then write, notice shown |
+| Explicit user save after a refusal | bounded `cp` backup awaited first; write only if the copy exits 0; failure notifies and leaves the file untouched |
+| Backup `cp` delayed | the write waits for the bounded process to finish (no fire-and-forget race) |
+| Backup `cp` fails | notice `configBackupFailed`, refusal kept, file not overwritten |
 | State read refused | no automatic state rewrite; one bounded retry |
 
 **Not exercised graphically:** the real keyboard paste routing under Wayland
@@ -225,10 +229,11 @@ path is covered by static invariants (a `Keys` handler on the focused
   `switchToTab()` directly; those functions were exercised through the
   keyboard path, which is the same code.
 - **`BoundedProcess` under a live Quickshell.** No second Quickshell was
-  started on the active session. The producer/UTF-8/cap behaviour is exercised
-  with the exact commands and a real `head`/`timeout`/`bash` pipeline, but the
-  QML component itself (failed-start detection, SIGKILL escalation, FIFO
-  restart) was only statically checked.
+  started on the active session. The producer caps, 50 MiB stream termination,
+  UTF-8 boundary and backup commands are exercised with real `head`/`timeout`/
+  `bash`/`cp` pipelines and the production decision functions; the Qt
+  `dataChanged`-per-chunk wiring, failed-start detection, SIGKILL escalation
+  and FIFO restart were only statically checked.
 - **Live monitor hotplug/removal and scale change.** The code listens to
   Hyprland monitor events and revalidates the visible window; no output was
   physically disconnected during the checks. `openOn` covers the per-screen
@@ -267,11 +272,14 @@ path is covered by static invariants (a `Keys` handler on the focused
   internal `watchChanges` behaviour is not bounded by this plugin: a file
   change can still make Qt's watcher stat/reload metadata, but no file content
   is read into QML by `FileView`. All content reads go through `head -c`.
-- stdout is producer-bounded (`head -c cap+1`) and the complete buffer is
-  byte-checked before decoding by the caller. stderr is not producer-bounded
-  (there is no byte-preserving split for it): a collector watcher terminates
-  the helper as soon as the text crosses the cap, and the exact UTF-8 length
-  is rechecked at exit, so at most one in-flight chunk can overshoot.
+- When `producerBound` is true, both streams stop at the producer (`head -c`
+  on stdout, process-substitution `head -c` on stderr) and the final UTF-8
+  length is rechecked before any parse. When `producerBound` is false, the
+  collector has `waitForEnd: false`, so `dataChanged` fires per chunk and the
+  cap is enforced by `Bounds.chunkOverflow` on every chunk; at most the
+  in-flight chunk can cross the cap. `waitForEnd: true` was removed because
+  Quickshell 0.3.2 only emitted `dataChanged` at stream end, which let memory
+  grow to the full producer output before the cap could act.
 - Qt 6.12 `TextInput` has no `dragEnter`/`dropEvent` and does not set
   `ItemAcceptsDrops`, so dragging text onto the search field inserts nothing.
   No drop handler was added because there is no native insertion path to

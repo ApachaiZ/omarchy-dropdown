@@ -627,9 +627,11 @@ compositor:
   paste generation and file-refusal policy.
 
 Every external command runs through `components/BoundedProcess.qml`: per-stream
-byte caps, an absolute deadline, SIGTERM→SIGKILL, failed-start detection and a
-single terminal result. Clipboard paste and file reads are producer-bounded;
-a truncated or oversized payload is refused instead of parsed.
+byte caps enforced on every chunk, an absolute deadline, SIGTERM→SIGKILL,
+failed-start detection and a single terminal result. Clipboard paste and file
+reads are producer-bounded; a truncated or oversized payload is refused
+instead of parsed. Replacing a config file that could not be read requires a
+bounded backup that must succeed first.
 
 `docs/architecture.md` describes the service lifecycle, config write policy and
 shortcut generation. GitHub Actions runs the unit tests, shell syntax check,

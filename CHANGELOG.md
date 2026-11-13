@@ -25,8 +25,10 @@ versioning for plugin releases.
   SIGKILL, failed-start detection and a single terminal result. Output is
   captured as raw bytes and decoded once from the complete bounded buffer
   (`StdioCollector`), so a multi-byte UTF-8 character split across reads is
-  never corrupted. A missing or hung binary can no longer leave callbacks,
-  queues or the shortcut check blocked.
+  never corrupted. `waitForEnd: false` makes the per-chunk cap effective
+  before memory can grow; producer-bound helpers additionally cap stdout and
+  stderr with `head -c`. A missing or hung binary can no longer leave
+  callbacks, queues or the shortcut check blocked.
 - Dispatch, client/monitor callback and launch-preemption queues have explicit
   caps; stale callbacks are dropped with a warning, and a saturated launch
   queue launches without preemption instead of losing the launch.
@@ -40,8 +42,9 @@ versioning for plugin releases.
   bounded `test -e`/`test -r` probe decides whether defaults may be created;
   on a timeout, overflow, permission error or unknown probe state the file is
   left intact, automatic saves are blocked, and the user is notified. An
-  explicit later save backs the file up first. A refused state file is never
-  rewritten automatically; one bounded retry may recover it.
+  explicit later save runs a bounded `cp` backup and waits for it to succeed
+  before writing; a failed backup aborts the save. A refused state file is
+  never rewritten automatically; one bounded retry may recover it.
 
 ## 0.8.0 — 2026-11-10
 

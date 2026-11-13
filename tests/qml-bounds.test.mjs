@@ -46,6 +46,12 @@ test("streams are decoded once from a bounded buffer, never per chunk", () => {
   assert.match(component, /stderr:\s*StdioCollector\s*\{/)
   assert.match(component, /id:\s*outCollector/)
   assert.match(component, /id:\s*errCollector/)
+  // waitForEnd must be false: with true, dataChanged only fires at the end and
+  // the cap could not stop memory growth.
+  assert.equal((component.match(/^\s+waitForEnd:\s*false/gm) || []).length, 2)
+  assert.equal(/waitForEnd:\s*true/.test(component), false)
+  assert.match(component, /Bounds\.chunkOverflow\(text\.length, cap\)/)
+  assert.equal(/SplitParser\s*\{/.test(component), false)
   assert.match(component, /onDataChanged:\s*root\._watchStream\(outCollector, root\.maxOutBytes\)/)
   assert.match(component, /onDataChanged:\s*root\._watchStream\(errCollector, root\.maxErrBytes\)/)
   // Exact byte length is rechecked before any caller can parse the text.
@@ -83,6 +89,28 @@ test("queued starts use a bounded FIFO instead of a single overwritten slot", ()
   assert.match(component, /function _terminate\(\)/)
   assert.match(component, /function _finalize\(code\)/)
   assert.match(component, /function _watchStream\(/)
+})
+
+test("onExited finalizes synchronously, without a deferred run boundary", () => {
+  const processBlock = findBlocks(component, "Process {")[0]
+  assert.match(processBlock, /onExited:\s*function\(code, status\)\s*\{[\s\S]*?root\._finalize\(code\)/)
+  assert.equal(/Qt\.callLater/.test(processBlock), false)
+})
+
+test("a refused configuration is backed up before the deferred write", () => {
+  assert.match(service, /id:\s*configBackupProc/)
+  assert.match(service, /configBackupProc\.start\(\["timeout", "-k", "1", "5", "cp", "--"/)
+  assert.match(service, /function finishRefusedBackup\(result\)/)
+  assert.match(service, /function finishRefusedBackup\(result\)[\s\S]*?if \(!result\.ok\)[\s\S]{0,800}service\.configBackupFailed/)
+  assert.match(service, /service\.writeConfigNow\(\)/)
+  assert.match(service, /service\.configRefused \|\| service\.configBackupInFlight|service\.configBackupInFlight/)
+  assert.equal(/service\.backupConfig\(\)\s*[\s\S]{0,40}service\.configRefused = false/.test(service), false)
+})
+
+test("clipboard start failure is reported and restoreAll invalidates the check", () => {
+  assert.match(overlay, /if \(!pasteProc\.start\(Bounds\.clipboardCommand\(primary === true\), tag\)\)/)
+  assert.match(overlay, /notice\.clipboardBusy/)
+  assert.match(service, /service\.cancelShortcutRequest\(\)\s*\n\s*service\.currentAppId/)
 })
 
 test("no helper is started through a bare running assignment", () => {
@@ -169,7 +197,11 @@ test("a failed config read never creates defaults unless the file is absent", ()
   assert.match(service, /if \(policy === "absent"\) service\.configAbsent\(\)/)
   assert.match(service, /property bool configRefused/)
   assert.match(service, /if \(service\.configRefused && explicit !== true\) return/)
-  assert.match(service, /service\.backupConfig\(\)[\s\S]{0,200}service\.configRefused = false/)
+  // The refused path no longer writes after a fire-and-forget backup: the
+  // bounded backup process must finish first.
+  assert.match(service, /function startRefusedBackup\(\)/)
+  assert.match(service, /configBackupProc\.start\(\["timeout", "-k", "1", "5", "cp", "--"/)
+  assert.match(service, /function finishRefusedBackup\(result\)[\s\S]*?service\.writeConfigNow\(\)/)
 })
 
 test("a refused state file is never rewritten automatically", () => {

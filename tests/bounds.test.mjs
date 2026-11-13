@@ -1,8 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
-import { spawnSync } from "node:child_process"
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs"
+import { spawnSync, spawn } from "node:child_process"
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -18,19 +18,22 @@ test("utf8ByteLength counts UTF-8 bytes, not UTF-16 units", () => {
 })
 
 test("producerCommand keeps the script constant and the command in argv", () => {
-  const command = Bounds.producerCommand(["wl-paste", "--no-newline; rm -rf /"], 65536, 2)
+  const command = Bounds.producerCommand(["wl-paste", "--no-newline; rm -rf /"], 65536, 2, 4096)
   assert.equal(command[0], "bash")
   assert.equal(command[1], "-c")
-  assert.equal(command[2], 'timeout -k 1 2 "$@" | head -c 65537; exit ${PIPESTATUS[0]}')
+  assert.equal(command[2],
+    'timeout -k 1 2 "$@" 2> >(head -c 4097 >&2) | head -c 65537; exit ${PIPESTATUS[0]}')
   assert.equal(command[3], "bash")
   assert.deepEqual(command.slice(4), ["wl-paste", "--no-newline; rm -rf /"])
 })
 
-test("producerCommand refuses empty commands and clamps the cap", () => {
+test("producerCommand refuses empty commands and clamps both caps", () => {
   assert.deepEqual(Bounds.producerCommand([], 100, 2), [])
   const command = Bounds.producerCommand(["true"], -5, 0)
   assert.match(command[2], /head -c 2;/)
   assert.match(command[2], /timeout -k 1 2 /)
+  // The default stderr cap is helperErrBytes, one byte above the consumer cap.
+  assert.match(command[2], new RegExp("head -c " + (Bounds.LIMITS.helperErrBytes + 1) + " >&2"))
 })
 
 test("fileReadCommand bounds the file producer without a shell", () => {
@@ -283,4 +286,136 @@ test("catalogRoom stops admitting entries at the catalog limit", () => {
   assert.equal(Bounds.catalogRoom(2, 1, 4), true)
   assert.equal(Bounds.catalogRoom(2, 2, 4), false)
   assert.equal(Bounds.catalogRoom(4096, 0, Bounds.LIMITS.catalogApps), false)
+})
+
+test("chunkOverflow only trips above the cap", () => {
+  assert.equal(Bounds.chunkOverflow(0, 4096), false)
+  assert.equal(Bounds.chunkOverflow(4096, 4096), false)
+  assert.equal(Bounds.chunkOverflow(4097, 4096), true)
+  assert.equal(Bounds.chunkOverflow(0, 0), false)
+  assert.equal(Bounds.chunkOverflow(1, 0), true)
+})
+
+// ---- Producer-side stderr cap, executed for real. ----
+test("producer bound stops a 50 MiB stderr stream at cap+1 bytes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-stderr-"))
+  try {
+    const script = join(dir, "flood")
+    writeFileSync(script, "#!/bin/sh\nhead -c 52428800 /dev/zero | tr '\\0' e >&2\nprintf OK\n")
+    chmodSync(script, 0o755)
+    const command = Bounds.producerCommand([script], 4096, 15, 1024)
+    const result = spawnSync(command[0], command.slice(1), {
+      timeout: 30000,
+      encoding: null
+    })
+    assert.equal(result.stdout.toString("utf8"), "OK")
+    assert.equal(result.stderr.length, 1025, "stderr must stop at the producer cap")
+    assert.equal(result.status, 0)
+    assert.ok(result.stderr.length < 1024 * 1024)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- Per-chunk cap algorithm on a real 50 MiB stream. ----
+// Mirrors BoundedProcess._watchStream: accumulate each chunk, ask the shared
+// `Bounds.chunkOverflow`, and kill the producer on the chunk that crosses the
+// cap. The component uses the same decision function on Qt's per-chunk
+// `dataChanged` (waitForEnd: false). This proves the memory bound on real
+// streams, not the Qt signal wiring (no Quickshell runtime is available here).
+function runChunkCap(script, stream, cap) {
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-c", script], { stdio: ["ignore", "pipe", "pipe"] })
+    const source = stream === "stderr" ? child.stderr : child.stdout
+    let text = ""
+    let rawBytes = 0
+    let chunks = 0
+    let lastChunkBytes = 0
+    let killed = false
+    function onChunk(buffer) {
+      if (killed) return
+      chunks++
+      rawBytes += buffer.length
+      lastChunkBytes = buffer.length
+      // ASCII payload: UTF-16 length equals byte length.
+      text += buffer.toString("utf8")
+      if (Bounds.chunkOverflow(text.length, cap)) {
+        killed = true
+        child.kill("SIGKILL")
+      }
+    }
+    source.on("data", onChunk)
+    child.on("close", () => resolve({
+      textLength: text.length, rawBytes, chunks, lastChunkBytes, killed
+    }))
+  })
+}
+
+test("50 MiB stdout stops at the per-chunk cap, not at 50 MiB", async () => {
+  const cap = 4096
+  const result = await runChunkCap("head -c 52428800 /dev/zero | tr '\\0' a", "stdout", cap)
+  assert.equal(result.killed, true)
+  assert.ok(result.rawBytes < 1024 * 1024, "must not accumulate 50 MiB: " + result.rawBytes)
+  assert.ok(result.textLength <= cap + result.lastChunkBytes)
+  assert.ok(result.textLength > cap)
+})
+
+test("50 MiB stderr stops at the per-chunk cap, not at 50 MiB", async () => {
+  const cap = 1024
+  const result = await runChunkCap("head -c 52428800 /dev/zero | tr '\\0' e >&2", "stderr", cap)
+  assert.equal(result.killed, true)
+  assert.ok(result.rawBytes < 1024 * 1024, "must not accumulate 50 MiB: " + result.rawBytes)
+  assert.ok(result.textLength <= cap + result.lastChunkBytes)
+  assert.ok(result.textLength > cap)
+})
+
+// ---- Refused-config backup: the exact command, awaited and checked. ----
+test("the backup command copies the old file before any deferred write", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nsleep 0.3\n/bin/cp \"$@\"\n")
+    chmodSync(join(bin, "cp"), 0o755)
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-test")
+    writeFileSync(source, "OLD")
+    const child = spawn("timeout", ["-k", "1", "5", "cp", "--", source, target], {
+      env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+      stdio: "ignore"
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(existsSync(target), false, "the write must wait for the backup")
+    const status = await new Promise((resolve) => child.on("close", resolve))
+    assert.equal(status, 0)
+    assert.equal(readFileSync(target, "utf8"), "OLD")
+    // The deferred write happens after the copy; the backup keeps the old text.
+    writeFileSync(source, "NEW")
+    assert.equal(readFileSync(target, "utf8"), "OLD")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a failing backup is observable and leaves no backup behind", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
+  try {
+    const bin = join(dir, "bin")
+    writeFileSync(join(dir, "placeholder"), "")
+    spawnSync("mkdir", ["-p", bin])
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nexit 1\n")
+    chmodSync(join(bin, "cp"), 0o755)
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-test")
+    writeFileSync(source, "OLD")
+    const result = spawnSync("timeout", ["-k", "1", "5", "cp", "--", source, target], {
+      env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+      encoding: null
+    })
+    assert.notEqual(result.status, 0)
+    assert.equal(existsSync(target), false)
+    assert.equal(readFileSync(source, "utf8"), "OLD")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

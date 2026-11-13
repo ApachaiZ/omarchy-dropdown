@@ -68,17 +68,20 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 - **Helper processes**: every `Process` is wrapped in `BoundedProcess`
   (per-stream caps, absolute deadline, SIGTERM→SIGKILL, failed-start
   detection). `StdioCollector` stores the raw bytes and the text is decoded
-  once, so a multi-byte character split across reads is never corrupted.
-  Output larger than the cap is a hard failure, never a partial parse.
-  Config/state/agent/shell/binds files are read with `timeout head -c` in argv
-  form, so a huge or malicious file is refused.
+  once, so a multi-byte character split across reads is never corrupted;
+  `waitForEnd: false` makes the per-chunk cap effective before the buffer can
+  grow. Producer-bound helpers also cap stdout and stderr with `head -c`
+  pipelines. Output larger than the cap is a hard failure, never a partial
+  parse. Config/state/agent/shell/binds files are read with `timeout head -c`
+  in argv form, so a huge or malicious file is refused.
 - **Refused files**: a failed config read is never treated as "missing". A
   bounded `test -e`/`test -r` probe decides whether defaults may be created;
   on a timeout, overflow, permission error or unknown probe state the file is
   left untouched, the configuration is marked refused and automatic writes
-  are blocked. An explicit later save backs the file up first and tells the
-  user. A refused state file is never rewritten automatically; one bounded
-  retry may recover it.
+  are blocked. An explicit later save runs a bounded `cp` backup and waits
+  for its success before writing; if the backup fails, nothing is overwritten
+  and the user is told. A refused state file is never rewritten
+  automatically; one bounded retry may recover it.
 - **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
   the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
   `~/.local/state/omarchy/`, and the bar placement file. The installer also

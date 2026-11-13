@@ -8,16 +8,17 @@
 //   and decodes them once into a QString. This is deliberate: splitting the
 //   stream into chunks with SplitParser and decoding each chunk separately
 //   corrupts a multi-byte UTF-8 character that straddles two reads.
-// - The byte caps are enforced before any caller parses the text. `producerBound`
-//   also wraps the command so it stops itself: `timeout -k 1 N` plus
-//   `head -c cap+1`. A collector watcher terminates a stream whose text
-//   exceeds the cap; the final result recomputes the exact UTF-8 byte length
-//   and marks `overflow`. A partial payload is never handed to a parser as if
-//   it were complete.
-// - stderr is bounded by the same collector watch plus the exact final check.
-//   Its producer is not wrapped (stderr has no byte-preserving pipeline), so a
-//   runaway stderr is killed as soon as the cap is crossed; at most one
-//   in-flight chunk can overshoot.
+// - The byte caps are enforced on every chunk, before the buffer grows.
+//   `StdioCollector` is configured with `waitForEnd: false`, so `dataChanged`
+//   fires per read and `_watchStream` terminates the helper once the
+//   accumulated text crosses the cap (at most one in-flight chunk beyond it).
+//   `producerBound` additionally wraps stdout and stderr so the producer stops
+//   itself: `timeout -k 1 N`, `head -c cap+1` on stdout and a
+//   process-substitution `head -c cap+1` on stderr. The final result
+//   recomputes the exact UTF-8 byte length and marks `overflow`. A partial
+//   payload is never handed to a parser as if it were complete.
+// - stderr is bounded both ways: the producer-side `head` caps it and the
+//   collector watch terminates a helper whose stderr crosses the cap.
 // - the QML deadline sends SIGTERM, then SIGKILL 500 ms later, and finally
 //   settles by force if the process still never reports `exited`.
 // - a failed start (binary missing) is detected through `runningChanged`.
@@ -111,7 +112,7 @@ Item {
     _tag = tag
     _active = true
     proc.command = producerBound
-      ? Bounds.producerCommand(list, maxOutBytes, producerTimeoutSeconds)
+      ? Bounds.producerCommand(list, maxOutBytes, producerTimeoutSeconds, maxErrBytes)
       : list
     // Arm the deadline before starting: a failed start can settle
     // synchronously from `runningChanged`, and the deadline must not be
@@ -132,7 +133,7 @@ Item {
   function _watchStream(collector, cap) {
     if (_settled || _overflow) return
     var text = _collectorText(collector)
-    if (text.length > cap) {
+    if (Bounds.chunkOverflow(text.length, cap)) {
       _overflow = true
       _terminate()
     }
@@ -188,19 +189,22 @@ Item {
     id: proc
     stdout: StdioCollector {
       id: outCollector
-      waitForEnd: true
+      // false: dataChanged fires per chunk, so the cap is enforced before the
+      // buffer can grow. The text is complete when the process exits.
+      waitForEnd: false
       onDataChanged: root._watchStream(outCollector, root.maxOutBytes)
     }
     stderr: StdioCollector {
       id: errCollector
-      waitForEnd: true
+      waitForEnd: false
       onDataChanged: root._watchStream(errCollector, root.maxErrBytes)
     }
     onStarted: function() { root._started = true }
     onExited: function(code, status) {
-      // Defer one event-loop turn so any final readyRead data reaches the
-      // collectors before the buffer is decoded.
-      Qt.callLater(function() { root._finalize(code) })
+      // The collectors hold the complete text when `exited` is emitted.
+      // Finalize synchronously: a deferred finalize could run after a new
+      // start and settle the next run with the previous code/text.
+      root._finalize(code)
     }
     onRunningChanged: {
       // QProcess failed to start: it never emits `exited`, so settling only

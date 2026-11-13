@@ -166,7 +166,8 @@ Item {
     maxErrBytes: 4096
     onFinished: function(result) {
       if (result.ok) {
-        service.acceptConfigRead(result.out)
+        if (Bounds.isCurrentGeneration(result.tag, service.configReadGeneration))
+          service.acceptConfigRead(result.out)
         // A change arrived while this read was running: read again with a
         // fresh generation instead of leaving the request pending.
         if (service.configReadAgain && !configReadProc.running) {
@@ -178,6 +179,21 @@ Item {
       }
     }
   }
+
+  // A refused configuration is only overwritten after a bounded, awaited
+  // backup. `cp` is not fire-and-forget: the write happens in onFinished and
+  // only when the copy exited 0.
+  BoundedProcess {
+    id: configBackupProc
+    producerBound: false
+    timeoutMs: 5000
+    maxOutBytes: 1024
+    maxErrBytes: 4096
+    onFinished: function(result) { service.finishRefusedBackup(result) }
+  }
+
+  property bool configBackupInFlight: false
+  property bool configBackupWasRefused: false
 
   // A failed read is never interpreted as "the file is absent". A bounded
   // `test -e`/`test -r` probe decides whether creating defaults is safe.
@@ -338,8 +354,12 @@ Item {
     maxOutBytes: Bounds.LIMITS.stateBytes
     maxErrBytes: 4096
     onFinished: function(result) {
-      if (result.ok) service.acceptStateRead(result.out)
-      else service.inspectStateFailure(result)
+      if (result.ok) {
+        if (Bounds.isCurrentGeneration(result.tag, service.stateReadGeneration))
+          service.acceptStateRead(result.out)
+      } else {
+        service.inspectStateFailure(result)
+      }
     }
   }
 
@@ -572,15 +592,63 @@ Item {
   function saveConfigNow() {
     configSaveTimer.stop()
     if (service.configRefused) {
-      service.backupConfig()
-      service.configRefused = false
-      service.configRefusalNotified = false
-      service.notify(service.tr("service.configOverwriteAfterRefusal"))
+      service.startRefusedBackup()
+      return
     }
+    service.writeConfigNow()
+  }
+
+  // The raw write, only reached when the file is readable or was proven
+  // absent, or after a refused version was successfully backed up.
+  function writeConfigNow() {
     var text = ConfigFile.encode(service.config)
     service.lastConfigWrite = text
     service.configDirty = false
     configView.setText(text)
+  }
+
+  // A refused file may only be replaced after its copy succeeded. The write
+  // is deferred to `finishRefusedBackup`; a failure notifies and leaves the
+  // file untouched. Concurrent requests coalesce into the single write of the
+  // latest `service.config`.
+  function startRefusedBackup() {
+    if (service.configBackupInFlight) return
+    var target = ConfigFile.backupName(service.configPath, new Date())
+    if (!target) {
+      service.notify(service.tr("service.configBackupFailed"))
+      return
+    }
+    service.configBackupInFlight = true
+    service.configBackupWasRefused = true
+    var started = configBackupProc.start(["timeout", "-k", "1", "5", "cp", "--",
+      service.configPath, target])
+    if (!started) {
+      service.configBackupInFlight = false
+      service.notify(service.tr("service.configBackupFailed"))
+    }
+  }
+
+  function finishRefusedBackup(result) {
+    service.configBackupInFlight = false
+    if (!result.ok) {
+      // If a successful read cleared the refusal while the copy was running,
+      // the file is readable again and the save may proceed normally.
+      if (!service.configRefused) {
+        service.writeConfigNow()
+        return
+      }
+      console.warn("omarchy-dropdown: configuration backup failed (" +
+        service.helperDetail(result) + "); refusing to overwrite dropdown.json")
+      service.notify(service.tr("service.configBackupFailed"))
+      return
+    }
+    var wasRefused = service.configBackupWasRefused
+    service.configBackupWasRefused = false
+    service.configRefused = false
+    service.configRefusalNotified = false
+    if (wasRefused)
+      service.notify(service.tr("service.configOverwriteAfterRefusal"))
+    service.writeConfigNow()
   }
 
   Timer {
@@ -3643,7 +3711,7 @@ Item {
     service.adoptable = ({})
     service.released = ({})
     service.savedRegistry = {}
-    service.pendingShortcut = null
+    service.cancelShortcutRequest()
     service.currentAppId = ""
     service.lastAppId = ""
     service.paletteOpen = false

@@ -77,8 +77,9 @@ state file ──────────► recovery ─► re-adopt parked win
   caps, an absolute deadline, SIGTERM then SIGKILL, failed-start detection and
   one terminal result. Output is captured as raw bytes by `StdioCollector` and
   decoded once from the complete bounded buffer, so a multi-byte UTF-8
-  character split across two reads is not corrupted. JSON helpers are
-  producer-bounded (`timeout … | head -c`); a truncated payload is a failure,
+  character split across two reads is not corrupted. `waitForEnd: false`
+  makes the per-chunk cap effective; producer-bound helpers also stop stdout
+  and stderr with `head -c` pipelines. A truncated payload is a failure,
   never a partial parse.
 
 ## Config writes
@@ -96,6 +97,9 @@ Only the service writes `~/.config/omarchy/dropdown.json`.
    five kept), then adopted. Invalid JSON is backed up but never adopted:
    settings stay in memory and the file is left for the user to fix. A file
    above the cap is refused without touching the previous configuration.
+   If a refused file must be replaced by an explicit user save, a bounded
+   `cp` backup runs first and the write waits for its success; a failed backup
+   aborts the save with a notice.
 5. If local edits are pending, they win: the file is backed up and rewritten.
 
 ## Direct shortcuts

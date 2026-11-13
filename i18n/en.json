@@ -195,6 +195,7 @@
   "notice.clipboardTooLarge": "Clipboard content is too large to paste.",
   "notice.clipboardTooLong": "Pasted text is longer than the %1-character filter.",
   "notice.clipboardFailed": "The clipboard could not be read.",
+  "notice.clipboardBusy": "Too many clipboard requests; try again.",
 
   "bar.help": "Move the Dropdown widget between the left, centre and right sections of the Omarchy bar.",
   "bar.section": "Section",
@@ -285,6 +286,7 @@
   "service.unreadableConfig": "dropdown.json is no longer readable; keeping the current settings.",
   "service.configReadRefused": "dropdown.json could not be read; it was left untouched and will not be overwritten automatically.",
   "service.configOverwriteAfterRefusal": "Saving the configuration after backing up the version that could not be read.",
+  "service.configBackupFailed": "The configuration was not saved because its backup failed.",
   "service.stateReadRefused": "The saved window state could not be read; it will not be overwritten automatically.",
   "service.movedSettings": "Moved settings from %1 to %2.",
   "service.reapplyingShortcuts": "Re-applying Dropdown direct shortcuts.",

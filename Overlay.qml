@@ -774,7 +774,7 @@ Item {
     producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.clipboardBytes
-    maxErrBytes: 4096
+    maxErrBytes: Bounds.LIMITS.clipboardErrBytes
     onFinished: function(result) {
       // A result from an older request (new paste, focus loss, close) must
       // never be inserted.
@@ -807,7 +807,8 @@ Item {
   function pasteFromClipboard(primary) {
     overlay.pasteGeneration++
     var tag = overlay.pasteGeneration
-    pasteProc.start(Bounds.clipboardCommand(primary === true), tag)
+    if (!pasteProc.start(Bounds.clipboardCommand(primary === true), tag))
+      overlay.say(strings.t("notice.clipboardBusy"))
   }
 
   function cancelPaste() {
