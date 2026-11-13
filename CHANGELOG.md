@@ -14,17 +14,20 @@ versioning for plugin releases.
   `hyprctl eval`, and the startup `mkdir -p` (5 s each), plus the
   launch-preemption park (3 s). No `Quickshell.execDetached` call site can
   bypass the deadline; a hung detached process is terminated by the wrapper.
-- Config backups now cap destination bytes at the 1 MiB config read cap. The
-  copy writes to a deterministic `<target>.part`, renames it atomically only
-  after `cp` succeeds, and removes the temporary on failure, timeout or a
-  SIGKILL of the wrapper. A source above the cap exits 75 before creating any
-  file, the source stays intact, and the write barrier is kept with a dedicated
-  notice (`service.configBackupTooLarge`).
+- Config backups now cap destination bytes by construction at the 1 MiB
+  config read cap. The copy is a bounded read (`head -c cap+1`) into a
+  deterministic `<target>.part`, and the real written size is checked, so a
+  source that grows after the `stat` precheck cannot produce a larger file.
+  An oversized part exits 75 and is removed; only a part of at most the cap is
+  renamed atomically to the final name. Failure, timeout or a SIGKILL of the
+  wrapper leaves no partial file (script EXIT trap plus a bounded cleanup
+  process). The source stays intact and the write barrier is kept, with a
+  dedicated notice (`service.configBackupTooLarge`).
 - The backup prune excludes `.part` files from the five kept backups and
   removes stale parts (older than two minutes) so a crashed copy cannot be
   counted as a backup or linger.
 
-Preuves: `node --test tests/*.test.mjs` (152/152), `./tests/run.sh`,
+Preuves: `node --test tests/*.test.mjs` (155/155), `./tests/run.sh`,
 `bash -n`, `omarchy plugin validate .` and `qmllint` on the changed QML.
 
 ## 0.8.2 — 2026-11-13

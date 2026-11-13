@@ -112,10 +112,14 @@ Only the service writes `~/.config/omarchy/dropdown.json`.
    is our own write and is ignored.
 4. A real external change is backed up (`dropdown.json.bak-YYYYMMDD-HHMMSSmmm-N`,
    unique even when two copies start in the same second; five kept), then
-   adopted. The backup is a bounded, awaited copy: it refuses a source above
-   the 1 MiB config cap (exit 75, no file created), writes to the deterministic
-   `<target>.part`, and renames it atomically only after the copy succeeded.
-   The temporary is removed on failure/timeout and as a SIGKILL backstop; the
+   adopted. The backup is a bounded, awaited copy: the destination is capped
+   by construction because the copy is a bounded read of at most `cap+1`
+   bytes into the deterministic `<target>.part`, then the real written size is
+   checked. A source above the 1 MiB config cap — or one that grows after the
+   fast `stat` precheck — exits 75, creates no final file and removes the
+   part. Only a part of at most `cap` bytes is renamed atomically to the final
+   name after a successful read. The temporary is removed on failure/timeout
+   and as a SIGKILL backstop; the
    prune excludes parts from the five and removes stale ones. The adoption (or
    the rewrite of local edits) runs only from the success
    handler, and a failed copy notifies and leaves the file and the in-memory

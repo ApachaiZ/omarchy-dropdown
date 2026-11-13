@@ -43,3 +43,19 @@ test("pruneCommand never interpolates the path into the shell string", () => {
   assert.equal(argv[4], "/home/me/.config/omarchy/dropdown.json")
   assert.ok(!argv[2].includes("/home/me"))
 })
+
+test("backupCommand bounds destination bytes and publishes atomically", () => {
+  const command = ConfigFile.backupCommand("/tmp/src", "/tmp/dst", 1048576, 3)
+  assert.equal(command[0], "bash")
+  assert.equal(command[1], "-c")
+  // The copy is a bounded read, not a source-only size check: the part can
+  // never receive more than cap+1 bytes, and its real size is checked.
+  assert.match(command[2], /timeout -k 1 "\$secs" head -c "\$\(\(cap \+ 1\)\)" -- "\$src" > "\$part"/)
+  assert.match(command[2], /written=\$\(wc -c < "\$part"/)
+  assert.match(command[2], /\[ "\$written" -le "\$cap" \] \|\| exit 75/)
+  assert.match(command[2], /mv -- "\$part" "\$dest"/)
+  assert.match(command[2], /trap cleanup EXIT/)
+  // Every value travels as a positional parameter; the script is constant.
+  assert.deepEqual(command.slice(3),
+    ["bash", "/tmp/src", "/tmp/dst", "/tmp/dst.part", "1048576", "3"])
+})

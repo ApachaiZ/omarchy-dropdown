@@ -49,11 +49,13 @@ function looksLikeConfig(text) {
 }
 
 // A refused configuration can be larger than the read cap. A backup copies
-// at most the same 1 MiB contract, to a deterministic `.part` file, and only
-// renames it to the final name after `cp` succeeded. The temporary is removed
-// on every exit path (inner timeout included), so a partial file never carries
-// a final backup name. Exit 75 means "source above the backup byte cap" and
-// creates nothing. The script is constant; source, target, cap and deadline
+// at most the same 1 MiB contract to a deterministic `.part` file: the copy
+// is a bounded read (`head -c cap+1`), so the destination is capped by
+// construction even if the source grows after the `stat` precheck. If the
+// written part is still above the cap (cap+1 bytes), it is refused with exit
+// 75 and removed. Only a part of at most `cap` bytes is renamed to the final
+// name, and only after the read succeeded, so a partial file never carries a
+// final backup name. The script is constant; source, target, cap and deadline
 // travel as positional parameters.
 var BACKUP_OVERSIZE_CODE = 75
 
@@ -71,7 +73,11 @@ function backupCommand(source, target, maxBytes, seconds) {
     'size=$(stat -c %s -- "$src" 2>/dev/null) || exit 2; ' +
     'case "$size" in ""|*[!0-9]*) exit 2;; esac; ' +
     '[ "$size" -le "$cap" ] || exit 75; ' +
-    'timeout -k 1 "$secs" cp -- "$src" "$part" || exit $?; ' +
+    'timeout -k 1 "$secs" head -c "$((cap + 1))" -- "$src" > "$part"; ' +
+    'status=$?; [ "$status" -eq 0 ] || exit "$status"; ' +
+    'written=$(wc -c < "$part" 2>/dev/null | tr -d "[:space:]"); ' +
+    'case "$written" in ""|*[!0-9]*) exit 2;; esac; ' +
+    '[ "$written" -le "$cap" ] || exit 75; ' +
     'mv -- "$part" "$dest" || exit $?; trap - EXIT',
     "bash", value, dest, dest + ".part", String(cap), String(secs)]
 }

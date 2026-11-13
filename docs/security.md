@@ -92,14 +92,16 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   are blocked. Every config backup is a bounded copy run in a
   `BoundedProcess`: an explicit save, an external-edit adoption and a rewrite
   of local edits all wait for its success before writing or adopting. The
-  destination is capped at the 1 MiB config read cap; a larger source exits
-  75 before creating anything (dedicated notice, barrier kept). The copy
-  writes `<target>.part` and renames it atomically only on success; failure,
-  timeout and a SIGKILL of the wrapper all leave no partial file, and the
-  prune removes stale parts. If the backup fails, nothing is overwritten and
-  the user is told; a second request during a copy is deferred to one pending
-  slot, never run concurrently. A refused state file is never rewritten
-  automatically; one bounded retry may recover it.
+  destination is capped by construction at the 1 MiB config read cap: the copy
+  is a bounded read of at most `cap+1` bytes into `<target>.part`, then the
+  real written size is checked, so a source that grows after the `stat`
+  precheck cannot produce a larger backup. An oversized part exits 75 and is
+  removed (dedicated notice, barrier kept). The part is renamed atomically
+  only on success; failure, timeout and a SIGKILL of the wrapper all leave no
+  partial file, and the prune removes stale parts. If the backup fails,
+  nothing is overwritten and the user is told; a second request during a copy
+  is deferred to one pending slot, never run concurrently. A refused state
+  file is never rewritten automatically; one bounded retry may recover it.
 - **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
   the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
   `~/.local/state/omarchy/`, and the bar placement file. The installer also

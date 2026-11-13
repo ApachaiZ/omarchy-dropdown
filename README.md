@@ -632,8 +632,8 @@ failed-start detection and a single terminal result. Both stdout and stderr
 are also capped at the producer, and stderr is drained synchronously so a
 delayed reader cannot lose a diagnostic. A truncated or oversized payload is
 refused instead of parsed. Every config write or external-edit adoption
-requires a bounded backup that must succeed first (destination capped at
-1 MiB, written to a `.part` and renamed atomically); a busy reveal batch is
+requires a bounded backup that must succeed first (destination capped by a
+bounded read, written to a `.part` and renamed atomically); a busy reveal batch is
 queued and bounded instead of detached, and every remaining detached call is
 wrapped in a global `timeout`.
 

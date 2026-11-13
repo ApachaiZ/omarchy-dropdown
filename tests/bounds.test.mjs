@@ -514,10 +514,16 @@ test("50 MiB stderr stops at the per-chunk cap, not at 50 MiB", async () => {
   assert.ok(result.textLength > cap)
 })
 
-// ---- Config backup: the exact production command, awaited. ----
+// ---- Config backup: the exact production command. ----
+// The raw script is used when a test fakes `head` (the script's copier); the
+// wrapped form also exercises the outer BoundedProcess pipeline.
 function backupCommand(source, target, cap = 1048576, seconds = 3) {
-  const inner = ConfigFile.backupCommand(source, target, cap, seconds)
-  return Bounds.producerCommand(inner, 1024, 4, 4096)
+  return ConfigFile.backupCommand(source, target, cap, seconds)
+}
+
+function wrappedBackupCommand(source, target, cap = 1048576, seconds = 3) {
+  return Bounds.producerCommand(ConfigFile.backupCommand(source, target, cap, seconds),
+    1024, 4, 4096)
 }
 
 test("the bounded backup copies the old file before any deferred write", async () => {
@@ -525,8 +531,8 @@ test("the bounded backup copies the old file before any deferred write", async (
   try {
     const bin = join(dir, "bin")
     mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nsleep 0.3\n/bin/cp \"$@\"\n")
-    chmodSync(join(bin, "cp"), 0o755)
+    writeFileSync(join(bin, "head"), "#!/bin/sh\nsleep 0.3\nexec /usr/bin/head \"$@\"\n")
+    chmodSync(join(bin, "head"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "OLD")
@@ -555,8 +561,8 @@ test("a failing bounded backup leaves no final file and no partial file", () => 
     mkdirSync(bin, { recursive: true })
     // Write a partial destination, then fail: the script must clean it up and
     // never publish the final name.
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nfor last; do :; done\nprintf partial > \"$last\"\nexit 1\n")
-    chmodSync(join(bin, "cp"), 0o755)
+    writeFileSync(join(bin, "head"), "#!/bin/sh\nprintf partial\nexit 1\n")
+    chmodSync(join(bin, "head"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "OLD")
@@ -580,8 +586,8 @@ test("a blocked bounded backup times out and removes the partial file", () => {
   try {
     const bin = join(dir, "bin")
     mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nfor last; do :; done\nprintf partial > \"$last\"\nsleep 30\n")
-    chmodSync(join(bin, "cp"), 0o755)
+    writeFileSync(join(bin, "head"), "#!/bin/sh\nprintf partial\nsleep 30\n")
+    chmodSync(join(bin, "head"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "OLD")
@@ -619,13 +625,57 @@ test("a backup above the byte cap creates nothing and keeps the source intact", 
   }
 })
 
+test("the destination cap holds even when the source-size precheck is bypassed", () => {
+  // The stat precheck is only a fast reject: a source that reports a small
+  // size while growing (or a fake stat) must still never produce more than
+  // cap bytes. The bounded read writes at most cap+1 to the part, then the
+  // real written size is checked and an oversized part is refused+removed.
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-grow-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, "stat"), "#!/bin/sh\necho 10\n")
+    chmodSync(join(bin, "stat"), 0o755)
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-test")
+    writeFileSync(source, Buffer.alloc(5000, 0x61))
+    const command = backupCommand(source, target, 1000, 3)
+    const result = spawnSync(command[0], command.slice(1), {
+      env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+      timeout: 15000,
+      encoding: null
+    })
+    assert.equal(result.status, ConfigFile.BACKUP_OVERSIZE_CODE)
+    assert.equal(existsSync(target), false, "no final backup above the cap")
+    assert.equal(existsSync(target + ".part"), false, "the oversized part is removed")
+    assert.equal(readFileSync(source).length, 5000)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a source exactly at the cap is accepted and never exceeds it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-exact-"))
+  try {
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-exact")
+    writeFileSync(source, Buffer.alloc(1024, 0x62))
+    const command = backupCommand(source, target, 1024, 3)
+    const result = spawnSync(command[0], command.slice(1), { timeout: 15000, encoding: null })
+    assert.equal(result.status, 0)
+    assert.equal(readFileSync(target).length, 1024)
+    assert.equal(existsSync(target + ".part"), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 test("a successful backup publishes the complete file and no part", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-ok-"))
   try {
     const source = join(dir, "drop down;$(echo pwn).json")
     const target = source + ".bak-20260102-030405006-1"
     writeFileSync(source, "COMPLETE")
-    const command = backupCommand(source, target)
+    const command = wrappedBackupCommand(source, target)
     const result = spawnSync(command[0], command.slice(1), { timeout: 15000, encoding: null })
     assert.equal(result.status, 0)
     assert.equal(readFileSync(target, "utf8"), "COMPLETE")
@@ -688,8 +738,8 @@ test("after a failed adoption backup, an automatic save writes nothing", () => {
   try {
     const bin = join(dir, "bin")
     mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nexit 1\n")
-    chmodSync(join(bin, "cp"), 0o755)
+    writeFileSync(join(bin, "head"), "#!/bin/sh\nexit 1\n")
+    chmodSync(join(bin, "head"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "EXTERNAL")
@@ -706,7 +756,8 @@ test("after a failed adoption backup, an automatic save writes nothing", () => {
     assert.equal(writes, 0)
     assert.equal(readFileSync(source, "utf8"), "EXTERNAL")
     assert.equal(Bounds.configSaveAction(refused, true), "backup")
-    // The explicit retry uses the real cp and succeeds, then the write runs.
+    // The explicit retry uses the real bounded read and succeeds, then the
+    // write runs.
     const retry = backupCommand(source, target)
     const ok = spawnSync(retry[0], retry.slice(1), { timeout: 15000, encoding: null })
     assert.equal(ok.status, 0)
@@ -734,8 +785,8 @@ test("two refused saves during a slow backup write once and keep the original ba
   try {
     const bin = join(dir, "bin")
     mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, "cp"), "#!/bin/sh\nsleep 0.25\n/bin/cp \"$@\"\n")
-    chmodSync(join(bin, "cp"), 0o755)
+    writeFileSync(join(bin, "head"), "#!/bin/sh\nsleep 0.25\nexec /usr/bin/head \"$@\"\n")
+    chmodSync(join(bin, "head"), 0o755)
     const source = join(dir, "dropdown.json")
     writeFileSync(source, "ORIGINAL")
     const state = { inFlight: false, pending: false, writes: 0, backups: [] }

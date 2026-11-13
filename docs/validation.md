@@ -12,7 +12,7 @@ Environment where the graphical checks were run:
 
 | Check | Result |
 | --- | --- |
-| `node --test tests/*.test.mjs` | 152/152 pass |
+| `node --test tests/*.test.mjs` | 155/155 pass |
 | `bash -n install.sh uninstall.sh tests/run.sh scripts/screenshots.sh` | pass |
 | `omarchy plugin validate .` | pass (exit 0) |
 | `qmllint Service.qml Overlay.qml components/BoundedProcess.qml` | no errors (only pre-existing unqualified-access warnings) |
@@ -31,7 +31,7 @@ Environment where the graphical checks were run:
 | Config/state refusal policy: defaults only for a provably absent file; timeout/overflow/permission/unknown probe keep the file untouched | pass |
 | 50 MiB stdout and 50 MiB stderr stop at the producer cap plus one byte, never at 50 MiB; a delayed `head` preserves legitimate stderr (10/10 runs); a producer that floods stderr still finishes (no SIGPIPE); a legitimate grandchild's stderr survives; quotes, separators, UTF-8 and newlines in argv stay one argument; exit codes 0/1/2/3/7/124/127 survive the wrapper | pass (`tests/bounds.test.mjs`) |
 | Every finite detached call is bounded: one `Quickshell.execDetached` site builds `timeout -k 1 N` via `Bounds.detachedCommand` (reload/dispatch/eval/mkdir 5 s, park 3 s); the wrapper ends a long fake helper (124), preserves complex argv and propagates 1/3/7 | pass (`tests/bounds.test.mjs` + static invariants) |
-| Config backup: bounded copy awaited for adoption, local-edit rewrite and refused replacement; destination bytes capped at 1 MiB (source above cap exits 75, creates nothing, source and barrier intact); writes to `.part` and renames atomically; failing/blocked copy removes the part; prune keeps five valid backups, excludes and removes stale parts | pass (`tests/bounds.test.mjs`) |
+| Config backup: bounded copy awaited for adoption, local-edit rewrite and refused replacement; destination bytes capped **by construction** (bounded read of at most cap+1 into `.part`, real written size checked; a source that grows or a misleading precheck still exits 75, creates no final and removes the part); writes `.part` and renames atomically; failing/blocked copy removes the part; prune keeps five valid backups, excludes and removes stale parts | pass (`tests/bounds.test.mjs`) |
 | Busy reveal batches: batches arriving during a slow `hyprctl` run are queued, executed in order, and each callback fires once; a saturated queue settles the rejected callback and logs. The launch-preemption park uses the same bounded detached helper with a 3 s deadline | pass (`tests/bounds.test.mjs` + static invariants) |
 | Failed adoption backup: the refusal barrier is restored, so a later automatic save is blocked (no write without a successful backup); an explicit save retries the backup | pass (unit policy + static call-graph invariants) |
 | Two refused saves during a slow backup: one write, one backup, and the backup holds the pre-write content; same-millisecond backup names are distinct files | pass (`tests/bounds.test.mjs`) |
@@ -181,7 +181,7 @@ live in `js/Bounds.js` and are covered by `tests/bounds.test.mjs`.
 | BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
 | Dispatch queue | 64 expressions (oldest dropped with warning) |
 | Detached finite calls | 5 s global `timeout -k 1 5` (reload, dispatch, disarm eval, startup mkdir); launch park 3 s |
-| Config backup | destination capped at 1 MiB; `.part` + atomic rename; stale parts removed after 2 min |
+| Config backup | destination capped at 1 MiB by a bounded read (at most cap+1 in `.part`, final never above cap); `.part` + atomic rename; stale parts removed after 2 min |
 | Reveal batch queue | 8 lots (newest refused when full; its callback still runs) |
 | Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
 | Launch preemption queue | 32 entries; overflow launches without preemption |
@@ -218,6 +218,7 @@ the real probe command):
 | Backup blocked | the inner deadline exits 124; no final file, no `.part`, no write |
 | Backup fails | notice `configBackupFailed`, refusal kept, no final file, no `.part`, source untouched |
 | Source above the backup cap | exit 75 before any file is created; dedicated notice `configBackupTooLarge`, source and write barrier kept |
+| Source grows after the size precheck (or a fake stat) | the bounded read writes at most cap+1; the real `.part` size is checked, so an oversized part exits 75 and is removed — no final file above the cap |
 | Stale `.part` from a killed copy | removed by the prune (older than 2 min); parts never count toward the five kept backups |
 | State read refused | no automatic state rewrite; one bounded retry |
 
