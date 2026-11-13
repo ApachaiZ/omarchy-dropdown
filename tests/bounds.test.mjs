@@ -19,23 +19,31 @@ test("utf8ByteLength counts UTF-8 bytes, not UTF-16 units", () => {
 })
 
 test("producerCommand keeps the script constant and the command in argv", () => {
-  const command = Bounds.producerCommand(["wl-paste", "--no-newline; rm -rf /"], 65536, 2)
+  const command = Bounds.producerCommand(["wl-paste", "--no-newline; rm -rf /"], 65536, 2, 4096)
   assert.equal(command[0], "bash")
   assert.equal(command[1], "-c")
-  assert.equal(command[2],
-    'timeout -k 1 2 "$@" | head -c 65537; exit ${PIPESTATUS[0]}')
+  // Both streams are bounded at the producer. The stderr reader is a
+  // synchronous pipeline member (not a process substitution, which bash does
+  // not wait for) and drains past its cap so the producer is not killed.
+  assert.match(command[2], /set -o pipefail/)
+  assert.match(command[2], /\| head -c 65537$/)
+  assert.match(command[2], /head -c 4097 >&2/)
+  assert.match(command[2], /cat > \/dev\/null/)
+  assert.equal(/\(>|>\)\(/.test(command[2]), false)
   assert.equal(command[3], "bash")
   assert.deepEqual(command.slice(4), ["wl-paste", "--no-newline; rm -rf /"])
-  // stderr is not routed through a process substitution: that could delay it
-  // past exited and lose the detail.
-  assert.equal(/2>/.test(command[2]), false)
 })
 
-test("producerCommand refuses empty commands and clamps the cap", () => {
+test("producerCommand refuses empty commands and clamps the caps", () => {
   assert.deepEqual(Bounds.producerCommand([], 100, 2), [])
   const command = Bounds.producerCommand(["true"], -5, 0)
-  assert.match(command[2], /head -c 2;/)
+  assert.match(command[2], /head -c 2$/)
+  assert.match(command[2], /head -c 2 >&2/)
   assert.match(command[2], /timeout -k 1 2 /)
+  // An omitted stderr cap falls back to the stdout cap, never unbounded.
+  assert.match(command[2], /head -c 2 >&2/)
+  const explicit = Bounds.producerCommand(["true"], 100, 2, 0)
+  assert.match(explicit[2], /head -c 2 >&2/)
 })
 
 test("fileReadCommand bounds the file producer without a shell", () => {
@@ -298,7 +306,7 @@ test("chunkOverflow only trips above the cap", () => {
   assert.equal(Bounds.chunkOverflow(1, 0), true)
 })
 
-// ---- stderr is bounded by the receiver chunk guard, not the wrapper. ----
+// ---- stderr is bounded at the producer, synchronously before exit. ----
 test("a small legitimate stderr is surfaced through the producer wrapper", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-stderr-"))
   try {
@@ -355,6 +363,64 @@ test("exit codes survive the producer wrapper", () => {
   assert.equal(result.status, 127)
 })
 
+test("stderr is capped at the producer and the helper still finishes", () => {
+  // 50 MiB on stderr, then a marker on stdout and exit 0. The producer must
+  // not die of SIGPIPE: the reader drains past its cap, so the run completes
+  // and only cap+1 bytes are delivered.
+  const command = Bounds.producerCommand(["sh", "-c",
+    "head -c 52428800 /dev/zero | tr '\\0' e >&2; echo done; exit 0"], 4096, 10, 8192)
+  const started = Date.now()
+  const result = spawnSync(command[0], command.slice(1), { timeout: 30000, encoding: null })
+  const elapsed = Date.now() - started
+  assert.equal(result.status, 0)
+  assert.equal(result.stdout.toString("utf8"), "done\n")
+  assert.equal(result.stderr.length, 8193, "stderr must stop at cap+1 bytes")
+  assert.ok(elapsed < 10000, "the drain must not block: " + elapsed + " ms")
+})
+
+test("stdout and stderr caps are independent", () => {
+  const command = Bounds.producerCommand(["sh", "-c",
+    "head -c 20000 /dev/zero | tr '\\0' o; head -c 20000 /dev/zero | tr '\\0' e >&2"], 4096, 10, 1024)
+  const result = spawnSync(command[0], command.slice(1), { timeout: 20000, encoding: null })
+  assert.equal(result.stdout.length, 4097)
+  assert.equal(result.stderr.length, 1025)
+})
+
+test("a legitimate grandchild's stderr survives the wrapper", () => {
+  const command = Bounds.producerCommand(["sh", "-c",
+    "sh -c 'echo grandchild >&2' >&2; echo parent >&2; exit 0"], 4096, 5)
+  const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr.toString("utf8"), "grandchild\nparent\n")
+})
+
+test("a timed-out wrapper leaves no orphan behind", () => {
+  const marker = "dropdown-orphan-" + process.pid + "-" + Date.now()
+  // exec -a keeps the marker visible in `ps`; the process replaces bash, so
+  // it is the direct child of `timeout` and must not survive the deadline.
+  const command = Bounds.producerCommand([
+    "bash", "-c", "exec -a " + marker + " sleep 30"
+  ], 1024, 1, 1024)
+  const started = Date.now()
+  const result = spawnSync(command[0], command.slice(1), { timeout: 15000, encoding: null })
+  assert.equal(result.status, 124)
+  assert.ok(Date.now() - started < 10000, "the deadline must fire near 1 s")
+  const ps = spawnSync("ps", ["-eo", "args="], { encoding: "utf8" })
+  const survivors = ps.stdout.split("\n").filter((line) => line.includes(marker))
+  assert.deepEqual(survivors, [], "no child may outlive the wrapper")
+})
+
+test("complex argv (quotes, separators, UTF-8, newline) stays one argument", () => {
+  const tricky = "a b;$(echo hi) q\"u'é\nline"
+  const command = Bounds.producerCommand(["sh", "-c",
+    "printf '[%s]' \"$1\"; printf 'E:%s' \"$2\" >&2", "x", tricky, tricky], 4096, 5)
+  const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
+  assert.equal(result.status, 0)
+  const expected = "[" + tricky + "]"
+  assert.equal(result.stdout.toString("utf8"), expected)
+  assert.equal(result.stderr.toString("utf8"), "E:" + tricky)
+})
+
 // ---- Per-chunk cap algorithm on a real 50 MiB stream. ----
 // Mirrors BoundedProcess._watchStream: accumulate each chunk, ask the shared
 // `Bounds.chunkOverflow`, and kill the producer on the chunk that crosses the
@@ -407,8 +473,12 @@ test("50 MiB stderr stops at the per-chunk cap, not at 50 MiB", async () => {
   assert.ok(result.textLength > cap)
 })
 
-// ---- Refused-config backup: the exact command, awaited and checked. ----
-test("the backup command copies the old file before any deferred write", async () => {
+// ---- Config backup: the exact command the service runs, awaited. ----
+function backupCommand(source, target) {
+  return Bounds.producerCommand(["cp", "--", source, target], 1024, 4, 4096)
+}
+
+test("the bounded backup copies the old file before any deferred write", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
   try {
     const bin = join(dir, "bin")
@@ -418,7 +488,8 @@ test("the backup command copies the old file before any deferred write", async (
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "OLD")
-    const child = spawn("timeout", ["-k", "1", "5", "cp", "--", source, target], {
+    const command = backupCommand(source, target)
+    const child = spawn(command[0], command.slice(1), {
       env: { ...process.env, PATH: bin + ":" + process.env.PATH },
       stdio: "ignore"
     })
@@ -435,24 +506,51 @@ test("the backup command copies the old file before any deferred write", async (
   }
 })
 
-test("a failing backup is observable and leaves no backup behind", () => {
+test("a failing bounded backup leaves no copy and the source intact", () => {
   const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
   try {
     const bin = join(dir, "bin")
-    writeFileSync(join(dir, "placeholder"), "")
-    spawnSync("mkdir", ["-p", bin])
+    mkdirSync(bin, { recursive: true })
     writeFileSync(join(bin, "cp"), "#!/bin/sh\nexit 1\n")
     chmodSync(join(bin, "cp"), 0o755)
     const source = join(dir, "dropdown.json")
     const target = join(dir, "dropdown.json.bak-test")
     writeFileSync(source, "OLD")
-    const result = spawnSync("timeout", ["-k", "1", "5", "cp", "--", source, target], {
+    const command = backupCommand(source, target)
+    const result = spawnSync(command[0], command.slice(1), {
       env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+      timeout: 15000,
       encoding: null
     })
     assert.notEqual(result.status, 0)
     assert.equal(existsSync(target), false)
     assert.equal(readFileSync(source, "utf8"), "OLD")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a blocked bounded backup times out without writing the target", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-backup-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, "cp"), "#!/bin/sh\nsleep 30\n")
+    chmodSync(join(bin, "cp"), 0o755)
+    const source = join(dir, "dropdown.json")
+    const target = join(dir, "dropdown.json.bak-test")
+    writeFileSync(source, "OLD")
+    const command = backupCommand(source, target)
+    const started = Date.now()
+    const result = spawnSync(command[0], command.slice(1), {
+      env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+      timeout: 20000,
+      encoding: null
+    })
+    assert.equal(result.status, 124)
+    assert.equal(existsSync(target), false)
+    assert.equal(readFileSync(source, "utf8"), "OLD")
+    assert.ok(Date.now() - started < 10000, "the producer deadline must fire")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -471,7 +569,7 @@ test("the bounded prune keeps the five most recent backups", () => {
       utimesSync(name, stamp, stamp)
       names.push(name)
     }
-    const command = ["timeout", "-k", "1", "5"].concat(ConfigFile.pruneCommand(source))
+    const command = Bounds.producerCommand(ConfigFile.pruneCommand(source), 1024, 4, 2048)
     const result = spawnSync(command[0], command.slice(1), { timeout: 10000, encoding: null })
     assert.equal(result.status, 0)
     const left = names.filter((name) => existsSync(name))
@@ -482,4 +580,94 @@ test("the bounded prune keeps the five most recent backups", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("enqueueBatch refuses the newest item when full instead of dropping one", () => {
+  let queue = []
+  for (let i = 0; i < 8; i++) {
+    const result = Bounds.enqueueBatch(queue, { id: i }, Bounds.LIMITS.batchQueueItems)
+    assert.equal(result.accepted, true)
+    queue = result.queue
+  }
+  const rejected = Bounds.enqueueBatch(queue, { id: 8 }, Bounds.LIMITS.batchQueueItems)
+  assert.equal(rejected.accepted, false)
+  assert.deepEqual(rejected.queue.map((entry) => entry.id), [0, 1, 2, 3, 4, 5, 6, 7])
+})
+
+// ---- Busy batch path: queued, ordered, callback exactly once, no detach. ----
+// Drives the same admission rule and producer wrapper the service uses. A
+// fake slow `hyprctl` logs each batch; five arrive while the first runs.
+test("queued batches run in order, slowly, and each callback fires once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dropdown-batch-"))
+  try {
+    const bin = join(dir, "bin")
+    mkdirSync(bin, { recursive: true })
+    const log = join(dir, "log")
+    writeFileSync(join(bin, "hyprctl"), "#!/bin/sh\nsleep 0.1\nprintf '%s\\n' \"$2\" >> " + log + "\n")
+    chmodSync(join(bin, "hyprctl"), 0o755)
+    const calls = []
+    let queue = []
+    let running = false
+    let current = null
+    function run(item) {
+      running = true
+      current = item
+      const command = Bounds.producerCommand(item.command, 4096, 3, 8192)
+      const child = spawn(command[0], command.slice(1), {
+        env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+        stdio: "ignore"
+      })
+      child.on("close", (status) => {
+        running = false
+        calls.push(item.id + ":" + status)
+        const next = queue.shift()
+        if (next) run(next)
+      })
+    }
+    function submit(id) {
+      const item = { id, command: ["hyprctl", "--batch", "dispatch id=" + id], callback: () => {} }
+      if (running) {
+        const result = Bounds.enqueueBatch(queue, item, Bounds.LIMITS.batchQueueItems)
+        queue = result.queue
+        assert.equal(result.accepted, true)
+        return
+      }
+      run(item)
+    }
+    submit(0)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    for (let i = 1; i <= 4; i++) submit(i)
+    assert.equal(queue.length, 4, "batches arriving during the first run are queued")
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    assert.deepEqual(calls, ["0:0", "1:0", "2:0", "3:0", "4:0"])
+    const lines = readFileSync(log, "utf8").trim().split("\n")
+    assert.deepEqual(lines, ["dispatch id=0", "dispatch id=1", "dispatch id=2",
+      "dispatch id=3", "dispatch id=4"])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a saturated batch queue still settles every callback", () => {
+  // Policy mirror: a rejected batch logs and calls back immediately; accepted
+  // batches call back once when their process settles.
+  const events = []
+  let queue = []
+  function submit(id, running) {
+    const item = { id, callback: () => events.push(id) }
+    if (running) {
+      const result = Bounds.enqueueBatch(queue, item, 2)
+      queue = result.queue
+      if (!result.accepted) item.callback()
+      return
+    }
+    item.callback()
+  }
+  submit(1, true)
+  submit(2, true)
+  submit(3, true) // saturated: callback now
+  assert.deepEqual(queue.map((entry) => entry.id), [1, 2])
+  assert.deepEqual(events, [3])
+  for (const item of queue) item.callback()
+  assert.deepEqual(events, [3, 1, 2])
 })

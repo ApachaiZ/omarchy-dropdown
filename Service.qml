@@ -160,7 +160,7 @@ Item {
 
   BoundedProcess {
     id: configReadProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.configBytes
     maxErrBytes: 4096
@@ -180,27 +180,32 @@ Item {
     }
   }
 
-  // A refused configuration is only overwritten after a bounded, awaited
-  // backup. `cp` is not fire-and-forget: the write happens in onFinished and
-  // only when the copy exited 0.
+  // Any configuration backup runs here: a bounded, awaited `cp`. The caller's
+  // follow-up (adopt the new file, rewrite local edits, or replace a refused
+  // file) runs from `onFinished` and only when the copy exited 0.
   BoundedProcess {
     id: configBackupProc
-    producerBound: false
+    producerTimeoutSeconds: 4
     timeoutMs: 5000
     maxOutBytes: 1024
     maxErrBytes: 4096
-    onFinished: function(result) { service.finishRefusedBackup(result) }
+    onFinished: function(result) { service.finishConfigBackup(result) }
   }
 
   property bool configBackupInFlight: false
-  property bool configBackupWasRefused: false
+  // Follow-up of the copy currently running; it receives `ok`.
+  property var configBackupFollowUp: null
+  // At most one deferred intent: the latest request made while a copy was
+  // running. It starts when the current copy settles, so two copies never
+  // race and a repeated request cannot loop.
+  property var configBackupNext: null
 
-  // Keeps the documented five most recent backups after a refused-config
-  // backup. Runs bounded and asynchronously: it never blocks or fails the
-  // write that follows a successful copy.
+  // Keeps the documented five most recent backups after every successful
+  // config backup. Runs bounded and asynchronously: it never blocks or fails
+  // the caller's follow-up.
   BoundedProcess {
     id: configPruneProc
-    producerBound: false
+    producerTimeoutSeconds: 4
     timeoutMs: 5000
     maxOutBytes: 1024
     maxErrBytes: 2048
@@ -213,8 +218,7 @@ Item {
 
   function pruneConfigBackups() {
     if (configPruneProc.running) return
-    var command = ["timeout", "-k", "1", "5"].concat(ConfigFile.pruneCommand(service.configPath))
-    if (!configPruneProc.start(command))
+    if (!configPruneProc.start(ConfigFile.pruneCommand(service.configPath)))
       console.warn("omarchy-dropdown: backup prune could not be started")
   }
 
@@ -222,7 +226,7 @@ Item {
   // `test -e`/`test -r` probe decides whether creating defaults is safe.
   BoundedProcess {
     id: configStatProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 1024
     maxErrBytes: 1024
@@ -343,9 +347,12 @@ Item {
     // clobber edits made while the write was in flight.
     if (ConfigFile.isOwnWrite(current, service.lastConfigWrite)) return
     if (service.configDirty) {
-      // Local edits are newer than the file: keep them and rewrite.
-      service.backupConfig()
-      service.saveConfigNow()
+      // Local edits are newer than the file: keep them and rewrite, but only
+      // after the bounded backup of the file we are about to replace.
+      service.backupConfig(function(ok) {
+        if (ok) service.saveConfigNow()
+        else service.notify(service.tr("service.configBackupFailed"))
+      })
       return
     }
     if (!ConfigFile.looksLikeConfig(current)) {
@@ -354,8 +361,10 @@ Item {
       service.notify(service.tr("service.invalidConfig"))
       return
     }
-    service.backupConfig()
-    service.loadConfig(current)
+    service.backupConfig(function(ok) {
+      if (ok) service.loadConfig(current)
+      else service.notify(service.tr("service.configBackupFailed"))
+    })
   }
 
   // The state file is written by this service only. It is read once at
@@ -372,7 +381,7 @@ Item {
 
   BoundedProcess {
     id: stateReadProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.stateBytes
     maxErrBytes: 4096
@@ -388,7 +397,7 @@ Item {
 
   BoundedProcess {
     id: stateStatProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 1024
     maxErrBytes: 1024
@@ -535,14 +544,63 @@ Item {
     autostartTimer.restart()
   }
 
-  // Copy the file before an external edit is adopted or overwritten. Five
-  // timestamped backups stay next to dropdown.json; pruning uses a constant
-  // path passed as an argument, never interpolated shell text.
-  function backupConfig() {
+  // Copy the file before an external edit is adopted or overwritten. The copy
+  // is a bounded, awaited BoundedProcess: `followUp(ok)` runs from its
+  // completion handler, and callers must not write or adopt before `ok`.
+  // Five timestamped backups stay next to dropdown.json; pruning uses a
+  // constant path passed as an argument, never interpolated shell text.
+  function backupConfig(followUp) {
+    var callback = typeof followUp === "function" ? followUp : null
+    if (service.configBackupInFlight) {
+      // One copy at a time. Keep only the latest deferred intent; it starts
+      // once the current copy settles, so no two copies race and no request
+      // is silently forgotten.
+      service.configBackupNext = { followUp: callback }
+      return true
+    }
+    return service._startConfigBackup(callback)
+  }
+
+  function _startConfigBackup(callback) {
     var target = ConfigFile.backupName(service.configPath, new Date())
-    if (!target) return
-    Quickshell.execDetached(["cp", "--", service.configPath, target])
-    Quickshell.execDetached(ConfigFile.pruneCommand(service.configPath))
+    if (!target) {
+      if (callback) callback(false)
+      else service.notify(service.tr("service.configBackupFailed"))
+      return false
+    }
+    service.configBackupInFlight = true
+    service.configBackupFollowUp = callback
+    var started = configBackupProc.start(["cp", "--", service.configPath, target])
+    if (!started) {
+      service.configBackupInFlight = false
+      service.configBackupFollowUp = null
+      if (callback) callback(false)
+      else service.notify(service.tr("service.configBackupFailed"))
+    }
+    return started
+  }
+
+  function finishConfigBackup(result) {
+    service.configBackupInFlight = false
+    var callback = service.configBackupFollowUp
+    service.configBackupFollowUp = null
+    if (result.ok) {
+      // The copy exists; keep the documented five most recent ones. The
+      // bounded prune is fire-and-forget and cannot block the follow-up.
+      service.pruneConfigBackups()
+    } else {
+      console.warn("omarchy-dropdown: configuration backup failed (" +
+        service.helperDetail(result) + ")")
+    }
+    if (typeof callback === "function") callback(result.ok === true)
+    else if (!result.ok) service.notify(service.tr("service.configBackupFailed"))
+    // A request made while this copy was running starts now, unless the
+    // follow-up itself already started another copy.
+    var next = service.configBackupNext
+    service.configBackupNext = null
+    if (!next) return
+    if (service.configBackupInFlight) service.configBackupNext = next
+    else service._startConfigBackup(next.followUp)
   }
 
   function normalizeConfig() {
@@ -631,50 +689,30 @@ Item {
   }
 
   // A refused file may only be replaced after its copy succeeded. The write
-  // is deferred to `finishRefusedBackup`; a failure notifies and leaves the
-  // file untouched. Concurrent requests coalesce into the single write of the
-  // latest `service.config`.
+  // is deferred to the backup's follow-up; a failure notifies and leaves the
+  // file untouched. Concurrent requests share the single backup slot.
   function startRefusedBackup() {
     if (service.configBackupInFlight) return
-    var target = ConfigFile.backupName(service.configPath, new Date())
-    if (!target) {
-      service.notify(service.tr("service.configBackupFailed"))
-      return
-    }
-    service.configBackupInFlight = true
-    service.configBackupWasRefused = true
-    var started = configBackupProc.start(["timeout", "-k", "1", "5", "cp", "--",
-      service.configPath, target])
-    if (!started) {
-      service.configBackupInFlight = false
-      service.notify(service.tr("service.configBackupFailed"))
-    }
-  }
-
-  function finishRefusedBackup(result) {
-    service.configBackupInFlight = false
-    if (!result.ok) {
-      // If a successful read cleared the refusal while the copy was running,
-      // the file is readable again and the save may proceed normally.
-      if (!service.configRefused) {
-        service.writeConfigNow()
+    service.backupConfig(function(ok) {
+      if (!ok) {
+        // If a successful read cleared the refusal while the copy was
+        // running, the file is readable again and the save may proceed.
+        if (!service.configRefused) {
+          service.writeConfigNow()
+          return
+        }
+        console.warn("omarchy-dropdown: configuration backup failed; " +
+          "refusing to overwrite dropdown.json")
+        service.notify(service.tr("service.configBackupFailed"))
         return
       }
-      console.warn("omarchy-dropdown: configuration backup failed (" +
-        service.helperDetail(result) + "); refusing to overwrite dropdown.json")
-      service.notify(service.tr("service.configBackupFailed"))
-      return
-    }
-    var wasRefused = service.configBackupWasRefused
-    service.configBackupWasRefused = false
-    service.configRefused = false
-    service.configRefusalNotified = false
-    if (wasRefused)
-      service.notify(service.tr("service.configOverwriteAfterRefusal"))
-    // The backup exists; keep the documented five most recent ones. The
-    // bounded prune is fire-and-forget and cannot block or duplicate the write.
-    service.pruneConfigBackups()
-    service.writeConfigNow()
+      var wasRefused = service.configRefused
+      service.configRefused = false
+      service.configRefusalNotified = false
+      if (wasRefused)
+        service.notify(service.tr("service.configOverwriteAfterRefusal"))
+      service.writeConfigNow()
+    })
   }
 
   Timer {
@@ -789,7 +827,6 @@ Item {
 
   BoundedProcess {
     id: terminalIdProc
-    producerBound: true
     producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 4096
@@ -808,7 +845,6 @@ Item {
 
   BoundedProcess {
     id: filesIdProc
-    producerBound: true
     producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 4096
@@ -837,7 +873,7 @@ Item {
 
   BoundedProcess {
     id: agentReadProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.agentBytes
     maxErrBytes: 4096
@@ -1231,7 +1267,6 @@ Item {
   // and reload again when a generated bind is absent.
   BoundedProcess {
     id: bindsVerifyProc
-    producerBound: true
     producerTimeoutSeconds: 3
     timeoutMs: 3500
     maxOutBytes: Bounds.LIMITS.hyprOutputBytes
@@ -1288,7 +1323,7 @@ Item {
 
   BoundedProcess {
     id: bindsReadProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.bindsBytes
     maxErrBytes: 4096
@@ -1386,7 +1421,6 @@ Item {
 
   BoundedProcess {
     id: clientsProc
-    producerBound: true
     producerTimeoutSeconds: 4
     timeoutMs: 4500
     maxOutBytes: Bounds.LIMITS.hyprOutputBytes
@@ -1402,7 +1436,6 @@ Item {
 
   BoundedProcess {
     id: monitorsProc
-    producerBound: true
     producerTimeoutSeconds: 4
     timeoutMs: 4500
     maxOutBytes: Bounds.LIMITS.hyprOutputBytes
@@ -1418,7 +1451,6 @@ Item {
 
   BoundedProcess {
     id: dispatchProc
-    producerBound: true
     producerTimeoutSeconds: 3
     timeoutMs: 4000
     maxOutBytes: 4096
@@ -1755,11 +1787,17 @@ Item {
   // `hyprctl --batch` applies all expressions in one compositor pass. The
   // reveal path uses it so the window is never rendered between "park",
   // "resize", "move to workspace" and "move off screen".
-  property var batchCallback: null
+  //
+  // A batch that arrives while another is running is queued, never detached:
+  // `execDetached` would bypass the deadline and the output caps. The queue is
+  // bounded; a rejected batch still runs its callback immediately (with a
+  // warning) so a reveal can never block. Every accepted batch runs its
+  // callback exactly once, whatever the outcome.
+  property var batchQueue: []
+  property var currentBatchCallback: null
 
   BoundedProcess {
     id: batchProc
-    producerBound: true
     producerTimeoutSeconds: 3
     timeoutMs: 4000
     maxOutBytes: 4096
@@ -1767,9 +1805,10 @@ Item {
     onFinished: function(result) {
       if (!result.ok && !result.canceled)
         service.noteHyprFailure("a batched reveal", service.helperDetail(result), result.code)
-      var callback = service.batchCallback
-      service.batchCallback = null
+      var callback = service.currentBatchCallback
+      service.currentBatchCallback = null
       if (typeof callback === "function") callback()
+      service.pumpBatch()
     }
   }
 
@@ -1780,14 +1819,37 @@ Item {
       if (expr) parts.push("dispatch " + expr)
     }
     if (parts.length === 0) return
-    var command = ["hyprctl", "--batch", parts.join(";")]
+    var item = {
+      command: ["hyprctl", "--batch", parts.join(";")],
+      callback: typeof callback === "function" ? callback : null
+    }
     if (batchProc.running) {
-      Quickshell.execDetached(command)
-      if (typeof callback === "function") Qt.callLater(callback)
+      var queued = Bounds.enqueueBatch(service.batchQueue, item, Bounds.LIMITS.batchQueueItems)
+      service.batchQueue = queued.queue
+      if (!queued.accepted) {
+        console.warn("omarchy-dropdown: batch queue full; dropping a reveal batch")
+        if (item.callback) Qt.callLater(item.callback)
+      }
       return
     }
-    service.batchCallback = typeof callback === "function" ? callback : null
-    batchProc.start(command)
+    service.startBatch(item)
+  }
+
+  function startBatch(item) {
+    service.currentBatchCallback = item.callback
+    if (batchProc.start(item.command)) return
+    // The wrapper refused the request: settle the reveal immediately.
+    service.currentBatchCallback = null
+    if (typeof item.callback === "function") Qt.callLater(item.callback)
+  }
+
+  function pumpBatch() {
+    if (batchProc.running) return
+    if (service.batchQueue.length === 0) return
+    var queue = service.batchQueue
+    var next = queue.shift()
+    service.batchQueue = queue
+    service.startBatch(next)
   }
 
   function focusExpr(address) {
@@ -2411,7 +2473,6 @@ Item {
 
   BoundedProcess {
     id: launchArmProc
-    producerBound: true
     producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 4096
@@ -3476,7 +3537,6 @@ Item {
 
   BoundedProcess {
     id: bindsCheckProc
-    producerBound: true
     producerTimeoutSeconds: 3
     timeoutMs: 3500
     maxOutBytes: Bounds.LIMITS.hyprOutputBytes
@@ -3950,7 +4010,6 @@ Item {
 
   BoundedProcess {
     id: cursorProc
-    producerBound: true
     producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: 4096

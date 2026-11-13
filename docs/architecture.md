@@ -73,15 +73,23 @@ state file ──────────► recovery ─► re-adopt parked win
   helper and a capped FIFO queue (64 entries, oldest dropped with a warning);
   a failed, timed-out or oversized dispatch is recorded in `hyprError` and
   exposed in `status`/`doctor`.
+- **Reveal batches.** `hyprctl --batch` applies one lot in a single
+  compositor pass through the same bounded helper. A batch that arrives while
+  another is running is queued in a bounded FIFO (8 entries) and never
+  detached; when the queue is full the rejected batch logs a warning and
+  still runs its callback, so a reveal is never blocked. Every accepted batch
+  settles its callback exactly once.
 - **External helpers.** Every `Process` is a `BoundedProcess`: per-stream byte
   caps, an absolute deadline, SIGTERM then SIGKILL, failed-start detection and
   one terminal result. Output is captured as raw bytes by `StdioCollector` and
   decoded once from the complete bounded buffer, so a multi-byte UTF-8
   character split across two reads is not corrupted. `waitForEnd: false`
-  makes the per-chunk cap effective; producer-bound helpers also stop stdout
-  with a `head -c` pipeline, while stderr stays direct so a delayed `head`
-  cannot truncate the diagnostic. A truncated payload is a failure,
-  never a partial parse.
+  makes the per-chunk cap effective, and every helper is also producer-bound:
+  `timeout -k 1` stops it, stdout goes through `head -c`, and stderr through a
+  synchronous bounded reader (`head -c`, then a drain to /dev/null). Since the
+  reader is a pipeline member, bash waits for the bounded diagnostic before
+  exiting; a process substitution would not be waited for. A truncated
+  payload is a failure, never a partial parse.
 
 ## Config writes
 
@@ -95,12 +103,16 @@ Only the service writes `~/.config/omarchy/dropdown.json`.
    `timeout head -c` (1 MiB cap). A change whose text equals `lastConfigWrite`
    is our own write and is ignored.
 4. A real external change is backed up (`dropdown.json.bak-YYYYMMDD-HHMMSS`,
-   five kept), then adopted. Invalid JSON is backed up but never adopted:
+   five kept), then adopted. The backup is a bounded, awaited `cp`: the
+   adoption (or the rewrite of local edits) runs only from its success
+   handler, and a failed copy notifies and leaves the file and the in-memory
+   configuration untouched. Invalid JSON is backed up but never adopted:
    settings stay in memory and the file is left for the user to fix. A file
    above the cap is refused without touching the previous configuration.
-   If a refused file must be replaced by an explicit user save, a bounded
-   `cp` backup runs first and the write waits for its success; a failed backup
-   aborts the save with a notice.
+   If a refused file must be replaced by an explicit user save, the same
+   bounded backup runs first; a failed backup aborts the save with a notice.
+   One backup runs at a time; a request made during a copy is kept as a
+   single pending intent.
 5. If local edits are pending, they win: the file is backed up and rewritten.
 
 ## Direct shortcuts

@@ -69,6 +69,16 @@ test("no QML file instantiates a raw Process", () => {
   }
 })
 
+test("both streams are producer-bounded before Qt receives them", () => {
+  // A process substitution is not waited for by bash; stderr would still be
+  // draining when `exited` fires. The wrapper uses a synchronous pipeline.
+  assert.equal(/2>\s*>\(/.test(component), false)
+  assert.match(component, /proc\.command = Bounds\.producerCommand\(list, maxOutBytes,/)
+  assert.equal(/\? Bounds\.producerCommand/.test(component), false)
+  // No caller can assign a raw argv vector to the Process.
+  assert.equal(/proc\.command = list/.test(component), false)
+})
+
 test("every helper uses a bounded component with a deadline and a cap", () => {
   const blocks = findBlocks(allQml, "BoundedProcess {")
   assert.ok(blocks.length >= 16, "expected every former Process to be wrapped")
@@ -97,14 +107,53 @@ test("onExited finalizes synchronously, without a deferred run boundary", () => 
   assert.equal(/Qt\.callLater/.test(processBlock), false)
 })
 
+test("the busy batch path queues bounded work instead of detaching", () => {
+  // The old fallback ran a detached hyprctl when a batch was already running,
+  // bypassing the deadline and caps.
+  assert.equal(/Quickshell\.execDetached\(command\)/.test(service), false)
+  assert.match(service, /Bounds\.enqueueBatch\(service\.batchQueue, item, Bounds\.LIMITS\.batchQueueItems\)/)
+  assert.match(service, /function pumpBatch\(\)/)
+  assert.match(service, /function startBatch\(item\)/)
+  // A batch keeps its functional shape: one hyprctl --batch per lot.
+  assert.match(service, /command:\s*\["hyprctl", "--batch", parts\.join\(";"\)\]/)
+  // The wrapper settles the callback exactly once, whatever the outcome,
+  // including a canceled or timed-out run.
+  assert.match(service, /onFinished: function\(result\) \{[\s\S]{0,500}?var callback = service\.currentBatchCallback/)
+  assert.match(service, /var callback = service\.currentBatchCallback\s*\n\s*service\.currentBatchCallback = null\s*\n\s*if \(typeof callback === "function"\) callback\(\)\s*\n\s*service\.pumpBatch\(\)/)
+  // A saturated queue still settles the rejected reveal immediately.
+  assert.match(service, /if \(!queued\.accepted\) \{[\s\S]{0,220}?Qt\.callLater\(item\.callback\)/)
+})
+
 test("a refused configuration is backed up before the deferred write", () => {
   assert.match(service, /id:\s*configBackupProc/)
-  assert.match(service, /configBackupProc\.start\(\["timeout", "-k", "1", "5", "cp", "--"/)
-  assert.match(service, /function finishRefusedBackup\(result\)/)
-  assert.match(service, /function finishRefusedBackup\(result\)[\s\S]*?if \(!result\.ok\)[\s\S]{0,800}service\.configBackupFailed/)
+  // The copy is a bounded, awaited wrapper call; no detached cp remains.
+  assert.match(service, /configBackupProc\.start\(\["cp", "--", service\.configPath, target\]\)/)
+  assert.equal(/Quickshell\.execDetached\(\["cp"/.test(service), false)
+  assert.match(service, /function finishConfigBackup\(result\)/)
+  assert.match(service, /function backupConfig\(followUp\)/)
+  // Every write/adoption goes through the follow-up and only on success.
+  assert.match(service, /service\.backupConfig\(function\(ok\) \{\s*\n\s*if \(ok\) service\.loadConfig\(current\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok\) \{\s*\n\s*if \(ok\) service\.saveConfigNow\(\)/)
   assert.match(service, /service\.writeConfigNow\(\)/)
-  assert.match(service, /service\.configRefused \|\| service\.configBackupInFlight|service\.configBackupInFlight/)
-  assert.equal(/service\.backupConfig\(\)\s*[\s\S]{0,40}service\.configRefused = false/.test(service), false)
+  assert.match(service, /configBackupFollowUp: null/)
+  assert.match(service, /configBackupNext/)
+  assert.equal(/configBackupWasRefused/.test(service), false)
+})
+
+test("the config prune is a bounded wrapper call with no detached origin", () => {
+  assert.match(service, /id:\s*configPruneProc/)
+  assert.match(service, /configPruneProc\.start\(ConfigFile\.pruneCommand\(service\.configPath\)\)/)
+  assert.equal(/Quickshell\.execDetached\(ConfigFile\.pruneCommand/.test(service), false)
+  assert.match(service, /id:\s*configPruneProc[\s\S]{0,220}producerTimeoutSeconds:\s*\d+/)
+})
+
+test("only one config backup can run at a time", () => {
+  // A single start call site behind the in-flight guard and one pending slot
+  // is what prevents double writes and re-entrant copies.
+  assert.equal((service.match(/configBackupProc\.start\(/g) || []).length, 1)
+  assert.match(service, /if \(service\.configBackupInFlight\) \{\s*\n\s*\/\/ One copy at a time/)
+  assert.match(service, /property var configBackupNext: null/)
+  assert.match(service, /if \(service\.configBackupInFlight\) service\.configBackupNext = next\s*\n\s*else service\._startConfigBackup\(next\.followUp\)/)
 })
 
 test("clipboard start failure is reported and restoreAll invalidates the check", () => {
@@ -113,15 +162,22 @@ test("clipboard start failure is reported and restoreAll invalidates the check",
   assert.match(service, /service\.cancelShortcutRequest\(\)\s*\n\s*service\.currentAppId/)
 })
 
-test("large-output and dispatch helpers bound stdout at the producer", () => {
+test("every helper bounds both streams at the producer", () => {
+  // There is no per-instance opt-out: BoundedProcess always wraps the command
+  // so neither stdout nor stderr relies on the receiver guard alone.
+  assert.equal(/producerBound/.test(allQml), false)
+  assert.equal(/producerBound/.test(component), false)
+  assert.match(component, /Bounds\.producerCommand\(list, maxOutBytes,\s*\n\s*producerTimeoutSeconds, maxErrBytes\)/)
   const ids = ["clientsProc", "monitorsProc", "bindsVerifyProc", "bindsCheckProc",
-    "dispatchProc", "batchProc", "launchArmProc", "pasteProc", "barMoveProc"]
+    "dispatchProc", "batchProc", "launchArmProc", "pasteProc", "barMoveProc",
+    "configReadProc", "configBackupProc", "configPruneProc", "configStatProc",
+    "stateReadProc", "stateStatProc", "agentReadProc", "bindsReadProc",
+    "barConfigReadProc", "terminalIdProc", "filesIdProc", "cursorProc"]
   const blocks = findBlocks(allQml, "BoundedProcess {").filter((block) =>
     ids.some((id) => new RegExp("id:\\s*" + id + "\\b").test(block)))
   assert.equal(blocks.length, ids.length)
   for (const block of blocks) {
-    assert.match(block, /producerBound:\s*true/)
-    assert.match(block, /producerTimeoutSeconds:\s*\d+/)
+    assert.match(block, /producerTimeoutSeconds:\s*\d+/, block.slice(0, 60))
   }
 })
 
@@ -212,10 +268,10 @@ test("a failed config read never creates defaults unless the file is absent", ()
   // The refused path no longer writes after a fire-and-forget backup: the
   // bounded backup process must finish first.
   assert.match(service, /function startRefusedBackup\(\)/)
-  assert.match(service, /configBackupProc\.start\(\["timeout", "-k", "1", "5", "cp", "--"/)
-  assert.match(service, /function finishRefusedBackup\(result\)[\s\S]*?service\.writeConfigNow\(\)/)
+  assert.match(service, /service\.backupConfig\(function\(ok\)/)
+  assert.match(service, /function startRefusedBackup\(\)[\s\S]*?service\.writeConfigNow\(\)/)
   assert.match(service, /id:\s*configPruneProc/)
-  assert.match(service, /service\.pruneConfigBackups\(\)[\s\S]{0,80}service\.writeConfigNow\(\)/)
+  assert.match(service, /service\.pruneConfigBackups\(\)/)
 })
 
 test("a refused state file is never rewritten automatically", () => {

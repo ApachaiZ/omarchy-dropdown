@@ -19,6 +19,7 @@ var LIMITS = {
   helperOutBytes: 65536,
   helperErrBytes: 8192,
   queueItems: 64,
+  batchQueueItems: 8,
   launchArmItems: 32,
   callbackMaxAgeMs: 30000,
   stateEntries: 512,
@@ -51,24 +52,35 @@ function utf8ByteLength(text) {
   return bytes
 }
 
-// Wrap an argv vector so the producer itself is bounded: `timeout` enforces an
-// absolute deadline and `head -c` stops stdout one byte past the consumer cap.
-// stderr is left untouched here: routing it through a process-substitution
-// `head` could delay it past `exited`, and the receiver already caps it on
-// every chunk (`waitForEnd: false` + chunkOverflow) plus an exact final check.
+// Wrap an argv vector so the producer itself is bounded on both streams:
+// `timeout` enforces an absolute deadline, `head -c` stops stdout one byte
+// past the consumer cap, and a second bounded reader caps stderr at its own
+// producer cap. The stderr reader is a synchronous pipeline member, not a
+// process substitution: bash waits for every member of a pipeline before it
+// exits, so the complete (bounded) diagnostic is in the pipe when `exited`
+// fires. A process substitution would not be waited for and could still be
+// draining after the helper is reported done. The reader drains past its cap
+// into /dev/null so a chatty producer is never killed by SIGPIPE on stderr.
+// The reader stage reports success so the producer's exit status (124 on
+// timeout, 127 when the tool is missing) is what reaches the caller.
 // The shell script is a constant; the command and its arguments travel as
-// positional parameters, so no caller value can become shell syntax. The exit
-// status is the producer's (124 on timeout, 141 on SIGPIPE, 127 when the tool
-// is missing), not `head`'s.
-function producerCommand(argv, maxBytes, timeoutSeconds) {
+// positional parameters, so no caller value can become shell syntax.
+function producerCommand(argv, maxBytes, timeoutSeconds, maxErrBytes) {
   var list = []
   for (var i = 0; i < (argv || []).length; i++) list.push(String(argv[i]))
   if (list.length === 0) return []
-  var cap = Math.max(1, Math.floor(Number(maxBytes) || 0)) + 1
+  var outCap = Math.max(1, Math.floor(Number(maxBytes) || 0)) + 1
+  var errLimit = maxErrBytes === undefined ? maxBytes : maxErrBytes
+  var errCap = Math.max(1, Math.floor(Number(errLimit) || 0)) + 1
   var seconds = Math.max(1, Math.ceil(Number(timeoutSeconds) || 2))
-  return ["bash", "-c",
-    "timeout -k 1 " + seconds + ' "$@" | head -c ' + cap + "; exit ${PIPESTATUS[0]}",
-    "bash"].concat(list)
+  // The reader gets one extra second so it cannot outlive the QML deadline
+  // when a grandchild inherits stderr; the producer itself still stops at
+  // `seconds`.
+  var readerSeconds = seconds + 1
+  var script = "set -o pipefail; { timeout -k 1 " + seconds +
+    ' "$@" 2>&1 1>&3 | { timeout -k 1 ' + readerSeconds +
+    ' bash -c "head -c ' + errCap + ' >&2; cat > /dev/null"; true; }; } 3>&1 | head -c ' + outCap
+  return ["bash", "-c", script, "bash"].concat(list)
 }
 
 // Bounded file read without a shell: `head` opens the path directly (argv
@@ -82,7 +94,7 @@ function fileReadCommand(path, maxBytes) {
 function clipboardCommand(primary) {
   var argv = ["wl-paste", "--no-newline"]
   if (primary === true) argv.push("--primary")
-  return producerCommand(argv, LIMITS.clipboardBytes, 2)
+  return producerCommand(argv, LIMITS.clipboardBytes, 2, LIMITS.clipboardErrBytes)
 }
 
 // Classify a file before deciding what a failed read may do. The script is
@@ -153,6 +165,18 @@ function pushBounded(queue, item, limit) {
     dropped++
   }
   return { queue: list, dropped: dropped }
+}
+
+// Batch queue admission. Unlike pushBounded, a full queue refuses the newest
+// item instead of dropping the oldest: a batch that was already accepted must
+// still run, and the caller runs the rejected item's callback immediately so
+// a reveal can never wait on a saturated queue.
+function enqueueBatch(queue, item, limit) {
+  var list = (queue || []).slice()
+  var max = Math.max(1, Math.floor(Number(limit) || 1))
+  if (list.length >= max) return { queue: list, accepted: false }
+  list.push(item)
+  return { queue: list, accepted: true }
 }
 
 // Callbacks carry their enqueue time. A helper that never finishes (or a
@@ -230,6 +254,7 @@ if (typeof module !== "undefined") {
     boundedKeys: boundedKeys,
     catalogRoom: catalogRoom,
     pushBounded: pushBounded,
+    enqueueBatch: enqueueBatch,
     pushCallback: pushCallback,
     takeFreshCallbacks: takeFreshCallbacks,
     chunkOverflow: chunkOverflow,

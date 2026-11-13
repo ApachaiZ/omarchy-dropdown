@@ -70,20 +70,26 @@ a policy-only review had missed: window titles were rendered as QML rich text.
   detection). `StdioCollector` stores the raw bytes and the text is decoded
   once, so a multi-byte character split across reads is never corrupted;
   `waitForEnd: false` makes the per-chunk cap effective before the buffer can
-  grow. Producer-bound helpers additionally cap stdout with `head -c`;
-  stderr stays direct so a delayed `head` cannot truncate the diagnostic and
-  is bounded by the per-chunk watcher. Output larger than the cap is a hard
-  failure, never a partial parse. Config/state/agent/shell/binds files are
-  read with `timeout head -c` in argv form, so a huge or malicious file is
-  refused.
+  grow. Both streams are also capped at the producer by a constant bash
+  pipeline: `timeout -k 1` bounds the helper, stdout is piped through
+  `head -c cap+1`, and stderr through a synchronous bounded reader that emits
+  at most `capErr+1` bytes and drains the rest to /dev/null. The reader is a
+  pipeline member, so bash cannot exit before the bounded diagnostic is
+  written; a process substitution would not be waited for. Output larger than
+  the cap is a hard failure, never a partial parse. Config/state/agent/shell/
+  binds files are read with `timeout head -c` in argv form, so a huge or
+  malicious file is refused.
 - **Refused files**: a failed config read is never treated as "missing". A
   bounded `test -e`/`test -r` probe decides whether defaults may be created;
   on a timeout, overflow, permission error or unknown probe state the file is
   left untouched, the configuration is marked refused and automatic writes
-  are blocked. An explicit later save runs a bounded `cp` backup and waits
-  for its success before writing; if the backup fails, nothing is overwritten
-  and the user is told. A refused state file is never rewritten
-  automatically; one bounded retry may recover it.
+  are blocked. Every config backup is a bounded `cp` run in a
+  `BoundedProcess`: an explicit save, an external-edit adoption and a rewrite
+  of local edits all wait for its success before writing or adopting. If the
+  backup fails, nothing is overwritten and the user is told; a second request
+  during a copy is deferred to one pending slot, never run concurrently. A
+  refused state file is never rewritten automatically; one bounded retry may
+  recover it.
 - **Writes**: `dropdown.json` (atomic, validated), its timestamped backups,
   the generated `~/.config/hypr/dropdown-binds.lua`, the state file under
   `~/.local/state/omarchy/`, and the bar placement file. The installer also
@@ -112,11 +118,10 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 
 ## Accepted residual limits
 
-- stderr is capped per chunk, so at most one in-flight chunk can cross the
-  configured cap before the helper is terminated.
-- The refused-config save path awaits a bounded backup. The separate
-  external-edit adoption path still requests its timestamped backup with a
-  detached `cp` (pre-existing behaviour); it never runs after a refused save.
+- The producer-side stderr reader drains what it does not deliver to
+  /dev/null, so a helper that writes an unbounded amount of stderr still
+  consumes CPU/IO while it runs; only the bytes reaching Qt are capped at
+  `capErr+1`.
 - `FileView` is notification/write only; its internal `watchChanges`
   metadata handling is outside the plugin's control.
 - No live Quickshell session was used for automated paste/process tests; the
@@ -125,6 +130,16 @@ a policy-only review had missed: window titles were rendered as QML rich text.
 
 ## History
 
+- **0.8.2** — process-resource prerequisites. stderr is now bounded at the
+  producer by a synchronous pipeline member (a delayed `head` cannot outlive
+  `exited`, and the excess is drained instead of SIGPIPE-killing the helper),
+  with the per-chunk watcher and final UTF-8 check kept as defence in depth.
+  Every config backup — external-edit adoption, local-edit rewrite and
+  refused-file replacement — is a bounded, awaited `cp`; the write or adoption
+  happens only after it succeeds. Busy reveal batches are queued in a bounded
+  FIFO and run through the bounded wrapper instead of a detached fallback;
+  every batch settles its callback exactly once. Reported in the marketplace
+  review (`omacom/omarchy-plugin-marketplace#14610`).
 - **0.8.1** — bounded paste and bounded helpers. The Manage search field
   intercepts all keyboard paste gestures and middle-click PRIMARY; clipboard
   reads are producer- and consumer-bounded (64 KiB, 2 s) with stale-request

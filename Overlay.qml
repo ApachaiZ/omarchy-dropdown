@@ -528,7 +528,6 @@ Item {
 
   BoundedProcess {
     id: barMoveProc
-    producerBound: true
     producerTimeoutSeconds: 5
     timeoutMs: 6000
     maxOutBytes: 4096
@@ -566,7 +565,7 @@ Item {
 
   BoundedProcess {
     id: barConfigReadProc
-    producerBound: false
+    producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.shellConfigBytes
     maxErrBytes: 4096
@@ -771,7 +770,6 @@ Item {
 
   BoundedProcess {
     id: pasteProc
-    producerBound: true
     producerTimeoutSeconds: 2
     timeoutMs: 3000
     maxOutBytes: Bounds.LIMITS.clipboardBytes

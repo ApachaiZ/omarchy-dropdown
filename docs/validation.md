@@ -29,9 +29,10 @@ Environment where the graphical checks were run:
 | UTF-8 boundary: a valid 65536-byte payload ending in `€` decodes from the complete buffer without U+FFFD; a 70002-byte payload cut at 65537 has no U+FFFD and is classified overflow; per-chunk decoding of the same bytes demonstrably produces U+FFFD | pass |
 | File probe (`timeout bash -c 'test -e/test -r'`) returns 0 readable, 2 unreadable, 1 absent; a 124 read with a readable file is refused | pass |
 | Config/state refusal policy: defaults only for a provably absent file; timeout/overflow/permission/unknown probe keep the file untouched | pass |
-| 50 MiB stdout and 50 MiB stderr with 1–4 KiB caps stop at the cap plus one in-flight chunk (per-chunk decision `Bounds.chunkOverflow`), never at 50 MiB; a delayed stdout `head` does not lose legitimate stderr; exit codes 0/1/2/3/7/124/127 survive the wrapper | pass (`tests/bounds.test.mjs`) |
-| Refused-config write path: bounded `cp` backup awaited; write deferred to its success; backup failure notifies and does not overwrite | pass (static invariants + backup command executed in tests) |
+| 50 MiB stdout and 50 MiB stderr stop at the producer cap plus one byte, never at 50 MiB; a delayed `head` preserves legitimate stderr (10/10 runs); a producer that floods stderr still finishes (no SIGPIPE); a legitimate grandchild's stderr survives; quotes, separators, UTF-8 and newlines in argv stay one argument; exit codes 0/1/2/3/7/124/127 survive the wrapper | pass (`tests/bounds.test.mjs`) |
+| Config backup: bounded `cp` awaited for adoption, local-edit rewrite and refused replacement; delayed copy completes before the write; failing copy leaves source and target intact; blocked copy times out (124) without a target; the receiver guard still trips on an oversized stream | pass (`tests/bounds.test.mjs` + static invariants) |
 | Bounded backup prune keeps the five most recent files and leaves the config untouched | pass (`tests/bounds.test.mjs`) |
+| Busy reveal batches: batches arriving during a slow `hyprctl` run are queued, executed in order, and each callback fires once; a saturated queue settles the rejected callback and logs; no detached `hyprctl --batch` fallback remains | pass (`tests/bounds.test.mjs` + static invariants) |
 | UTF-8 byte counting, queue caps, stale-callback expiry, insertion verdicts, state/catalog caps | pass (unit tests) |
 | `en.json`/`fr.json` strict key and placeholder parity | pass |
 
@@ -150,14 +151,15 @@ Environment where the graphical checks were run:
 | Geometry/tab-position settings keep the palette open | works |
 | Bar widget remains visible after moving it on a portrait output | works in the left section; the centre/right sections of that bar can render off-window |
 
-## Bounds and clipboard (0.8.1)
+## Bounds and clipboard (0.8.2)
 
 All external helpers run through `components/BoundedProcess.qml`. Output is
 captured by `StdioCollector` (raw bytes, decoded once) rather than a chunk
 splitter, because decoding each `readyRead` chunk separately corrupts a
-multi-byte UTF-8 character that straddles two reads. Byte caps are enforced
-before any caller parses; numeric limits live in `js/Bounds.js` and are
-covered by `tests/bounds.test.mjs`.
+multi-byte UTF-8 character that straddles two reads. Both streams are capped
+at the producer by a constant bash pipeline, and the per-chunk receiver check
+plus the final exact UTF-8 length remain as defence in depth. Numeric limits
+live in `js/Bounds.js` and are covered by `tests/bounds.test.mjs`.
 
 | Resource | Cap |
 | --- | --- |
@@ -170,11 +172,13 @@ covered by `tests/bounds.test.mjs`.
 | Default agent file | 64 KiB |
 | Generated binds file | 1 MiB |
 | `hyprctl clients/monitors/binds` output | 4 MiB, truncated output = failure |
-| stderr, file/clipboard/status helpers | 4 KiB, per-chunk cap (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
-| stderr, file probes | 1 KiB (`configStatProc`, `stateStatProc`) |
-| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB, per-chunk cap (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
+| stderr, file/clipboard/status helpers | 4 KiB, producer cap plus the receiver chunk check (`configReadProc`, `stateReadProc`, `agentReadProc`, `bindsReadProc`, `barConfigReadProc`, `pasteProc`, `terminalIdProc`, `filesIdProc`, `cursorProc`) |
+| stderr, file probes | 1 KiB producer cap (`configStatProc`, `stateStatProc`) |
+| stderr, Hyprland/dispatch/launch/bar helpers | 8 KiB producer cap (`clientsProc`, `monitorsProc`, `dispatchProc`, `batchProc`, `launchArmProc`, `bindsVerifyProc`, `bindsCheckProc`, `barMoveProc`) |
+| stderr, config backup/prune | 4 KiB / 2 KiB producer cap (`configBackupProc`, `configPruneProc`) |
 | BoundedProcess start FIFO | 8 entries; `start()` returns false when full |
 | Dispatch queue | 64 expressions (oldest dropped with warning) |
+| Reveal batch queue | 8 lots (newest refused when full; its callback still runs) |
 | Client/monitor callbacks | 64 entries, entries older than 30 s ignored |
 | Launch preemption queue | 32 entries; overflow launches without preemption |
 | Config apps / state entries | 512 each |
@@ -204,7 +208,10 @@ the real probe command):
 | File provably absent | defaults created (config) / state writable |
 | File present but unreadable | refuse, notify, no automatic write |
 | Explicit user save after a refusal | bounded `cp` backup awaited first; write only if the copy exits 0; failure notifies and leaves the file untouched |
+| External edit adoption | bounded `cp` awaited first; the new file is adopted only on exit 0; failure notifies and keeps the old configuration |
+| Backup request during a copy | kept as one pending intent and started after the current copy; never two concurrent copies |
 | Backup `cp` delayed | the write waits for the bounded process to finish (no fire-and-forget race) |
+| Backup `cp` blocked | the producer deadline exits 124; no target and no write |
 | Backup `cp` fails | notice `configBackupFailed`, refusal kept, file not overwritten |
 | State read refused | no automatic state rewrite; one bounded retry |
 
@@ -273,15 +280,14 @@ path is covered by static invariants (a `Keys` handler on the focused
   internal `watchChanges` behaviour is not bounded by this plugin: a file
   change can still make Qt's watcher stat/reload metadata, but no file content
   is read into QML by `FileView`. All content reads go through `head -c`.
-- Producer-bound helpers (clipboard, `hyprctl` JSON/dispatch/batch/launch,
-  bar move, terminal/file/cursor probes) cap **stdout** at the producer with
-  `head -c`; the final UTF-8 length is rechecked before any parse. stderr is
-  deliberately not routed through a producer `head`: a delayed `head` could
-  still be draining when `exited` is emitted, losing the diagnostic. stderr is
-  bounded by the per-chunk watcher instead. Every collector uses
-  `waitForEnd: false`, so `dataChanged` fires per chunk and
-  `Bounds.chunkOverflow` stops the helper at cap plus at most the in-flight
-  chunk. `waitForEnd: true` was removed because Quickshell 0.3.2 only emitted
+- All helpers, not only some, cap **stdout and stderr** at the producer. The
+  wrapper runs `timeout -k 1` with stdout piped through `head -c` and stderr
+  through a synchronous bounded reader (`head -c cap+1`, then a drain to
+  /dev/null). The reader is a pipeline member, so bash cannot exit while it is
+  still draining; a process substitution would not be waited for. The final
+  UTF-8 length is rechecked before any parse, and the per-chunk watcher
+  (`waitForEnd: false`, `Bounds.chunkOverflow`) remains as defence in depth.
+  `waitForEnd: true` was removed because Quickshell 0.3.2 only emitted
   `dataChanged` at stream end, which let memory grow to the full producer
   output before the cap could act.
 - Qt 6.12 `TextInput` has no `dragEnter`/`dropEvent` and does not set

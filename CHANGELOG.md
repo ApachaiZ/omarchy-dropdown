@@ -4,6 +4,31 @@ All notable changes to Dropdown are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning for plugin releases.
 
+## 0.8.2 — 2026-11-13
+
+### Fixed
+
+- stderr is capped at the producer, not only by the QML receiver. The shared
+  wrapper runs the helper under `timeout` and pipes stderr through a
+  synchronous bounded reader (`head -c cap+1`, then a drain to /dev/null), so
+  a chatty helper can neither grow the buffer nor lose its diagnostic before
+  `exited`; the excess is drained instead of SIGPIPE-killing the helper.
+  Every `BoundedProcess` uses this wrapper (the per-instance opt-out was
+  removed); the per-chunk watcher and the exact UTF-8 final check remain as
+  defence in depth.
+- External config edits are adopted only after a bounded, awaited backup.
+  `backupConfig` runs `cp` in a `BoundedProcess` and the write or adoption is
+  deferred to its success; a failure notifies and keeps the existing
+  configuration. A request made while a copy is running is kept as one
+  pending intent, never a concurrent copy. The five-backup prune runs through
+  the same bounded wrapper instead of `Quickshell.execDetached`.
+- A reveal batch that arrives while `hyprctl --batch` is running is queued in
+  a bounded FIFO and run through the bounded wrapper instead of a detached
+  fallback. Every batch settles its callback exactly once (success, failure,
+  timeout, cancellation, or queue saturation, where the rejected batch logs
+  and still runs its callback so the reveal is never blocked). Expressions of
+  one lot are still applied in a single `hyprctl --batch` pass.
+
 ## 0.8.1 — 2026-11-13
 
 ### Security

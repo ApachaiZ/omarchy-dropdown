@@ -8,18 +8,20 @@
 //   and decodes them once into a QString. This is deliberate: splitting the
 //   stream into chunks with SplitParser and decoding each chunk separately
 //   corrupts a multi-byte UTF-8 character that straddles two reads.
-// - The byte caps are enforced on every chunk, before the buffer grows.
+// - stdout and stderr are both bounded at the producer. A single constant
+//   bash pipeline runs the helper under `timeout -k 1 N`, pipes stdout through
+//   `head -c capOut+1`, and pipes stderr through a synchronous reader that
+//   emits at most `capErr+1` bytes and drains the rest to /dev/null. Both
+//   stages are pipeline members, so bash cannot exit before the bounded
+//   stderr is written: nothing races the finalize. (A process substitution is
+//   not waited for by bash and would reintroduce that race.)
+// - The byte caps are also enforced on every chunk, before the buffer grows.
 //   `StdioCollector` is configured with `waitForEnd: false`, so `dataChanged`
 //   fires per read and `_watchStream` terminates the helper once the
 //   accumulated text crosses the cap (at most one in-flight chunk beyond it).
-//   `producerBound` additionally wraps stdout so the producer stops itself
-//   with `timeout -k 1 N` plus `head -c cap+1`. The final result recomputes
-//   the exact UTF-8 byte length and marks `overflow`. A partial payload is
-//   never handed to a parser as if it were complete.
-// - stderr is not routed through a producer-side pipeline: a delayed `head`
-//   in such a pipeline could still be draining when `exited` is emitted, and
-//   the synchronous finalize would read a truncated collector. stderr is
-//   bounded by the per-chunk watcher and the exact final check instead.
+//   The final result recomputes the exact UTF-8 byte length and marks
+//   `overflow`. A partial payload is never handed to a parser as if it were
+//   complete. This receiver guard is defence in depth behind the producer.
 // - the QML deadline sends SIGTERM, then SIGKILL 500 ms later, and finally
 //   settles by force if the process still never reports `exited`.
 // - a failed start (binary missing) is detected through `runningChanged`.
@@ -47,7 +49,6 @@ Item {
   property int maxOutBytes: Bounds.LIMITS.helperOutBytes
   property int maxErrBytes: Bounds.LIMITS.helperErrBytes
   property int timeoutMs: 4000
-  property bool producerBound: true
   property int producerTimeoutSeconds: 2
   readonly property int maxQueue: 8
 
@@ -112,9 +113,8 @@ Item {
     _started = false
     _tag = tag
     _active = true
-    proc.command = producerBound
-      ? Bounds.producerCommand(list, maxOutBytes, producerTimeoutSeconds)
-      : list
+    proc.command = Bounds.producerCommand(list, maxOutBytes,
+      producerTimeoutSeconds, maxErrBytes)
     // Arm the deadline before starting: a failed start can settle
     // synchronously from `runningChanged`, and the deadline must not be
     // restarted on an already-settled run afterwards.
@@ -165,7 +165,7 @@ Item {
     if (!isFinite(exitCode)) exitCode = -1
     // The producer wrapper's `timeout` exits 124. Surface that as the same
     // timeout flag the QML deadline sets, for callers that branch on it.
-    if (producerBound && exitCode === 124 && !_startFailed) _timedOut = true
+    if (exitCode === 124 && !_startFailed) _timedOut = true
     var result = {
       ok: !_overflow && !_timedOut && !_startFailed && !_canceled && exitCode === 0,
       code: _startFailed ? -1 : exitCode,
